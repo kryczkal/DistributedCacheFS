@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
     // Initialize default logger (console) before config is parsed
     try {
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [T:%t] [%^%l%$] [%n] %v");
+        console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [ThreadID:%t] [%^%l%$] [%n] %v");
         auto main_logger = std::make_shared<spdlog::logger>("DistributedCacheFS", console_sink);
         spdlog::set_default_logger(main_logger);
         spdlog::set_level(spdlog::level::info);
