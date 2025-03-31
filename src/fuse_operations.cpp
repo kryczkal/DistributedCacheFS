@@ -1,8 +1,8 @@
-#define FUSE_USE_VERSION 31
+#include "app_constants.hpp"
 
-#include "fuse_operations.hpp"
 #include <spdlog/spdlog.h>
 #include "config/config_types.hpp"
+#include "fuse_operations.hpp"
 
 #include <fuse3/fuse.h>
 #include <cerrno>

@@ -1,6 +1,8 @@
 #ifndef DISTRIBUTEDCACHEFS_SRC_CONFIG_CONFIG_TYPES_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_CONFIG_CONFIG_TYPES_HPP_
 
+#include "app_constants.hpp"
+
 #include <spdlog/spdlog.h>
 #include <cstdint>
 #include <filesystem>
@@ -33,9 +35,9 @@ std::optional<spdlog::level::level_enum> StringToLogLevel(const std::string &lev
 //------------------------------------------------------------------------------//
 
 struct GlobalSettings {
-    spdlog::level::level_enum log_level = spdlog::level::info;
-    std::string mdns_service_name       = "_dcachefs._tcp";
-    std::uint16_t listen_port           = 9876;
+    spdlog::level::level_enum log_level = Constants::DEFAULT_LOG_LEVEL;
+    std::string mdns_service_name       = std::string(Constants::DEFAULT_MDNS_SERVICE_NAME);
+    std::uint16_t listen_port           = Constants::DEFAULT_LISTEN_PORT;
 };
 
 struct StorageDefinition {

@@ -1,5 +1,6 @@
 #define FUSE_USE_VERSION 31
 
+#include "app_constants.hpp"
 #include "config/config_loader.hpp"
 #include "config/config_types.hpp"
 #include "fuse_operations.hpp"
@@ -18,7 +19,7 @@
 int main(int argc, char *argv[])
 {
     // Command Line argument parsing
-    CLI::App app{"DistributedCacheFS - A FUSE-based distributed cache filesystem."};
+    CLI::App app{std::string(DistributedCacheFS::Constants::APP_NAME)};
     app.allow_extras();
 
     std::string config_path_str;
@@ -31,8 +32,8 @@ int main(int argc, char *argv[])
     app.add_option("mountpoint", mount_point_str, "Path to the FUSE mount point")->required();
 
     app.set_version_flag(
-        "-v,--version", "DistributedCacheFS version 0.1.0"
-    );  // TODO: Take this from cmake
+        "-v,--version", std::string(DistributedCacheFS::Constants::APP_VERSION_STRING)
+    );
 
     try {
         app.parse(argc, argv);
@@ -43,16 +44,20 @@ int main(int argc, char *argv[])
     // Initialize default logger (console) before config is parsed
     try {
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [ThreadID:%t] [%^%l%$] [%n] %v");
-        auto main_logger = std::make_shared<spdlog::logger>("DistributedCacheFS", console_sink);
+        console_sink->set_pattern(
+            std::string(DistributedCacheFS::Constants::DEFAULT_CONSOLE_LOG_PATTERN)
+        );
+        auto main_logger = std::make_shared<spdlog::logger>(
+            std::string(DistributedCacheFS::Constants::APP_NAME), console_sink
+        );
         spdlog::set_default_logger(main_logger);
-        spdlog::set_level(spdlog::level::info);
-        spdlog::flush_on(spdlog::level::warn);
+        spdlog::set_level(DistributedCacheFS::Constants::DEFAULT_LOG_LEVEL);
+        spdlog::flush_on(DistributedCacheFS::Constants::DEFAULT_FLUSH_LEVEL);
     } catch (const spdlog::spdlog_ex &ex) {
         std::cerr << "Log initialization failed: " << ex.what() << std::endl;
         return EXIT_FAILURE;
     }
-    spdlog::info("DistributedCacheFS starting...");
+    spdlog::info("{} starting...", DistributedCacheFS::Constants::APP_NAME);
 
     // Load Configuration
     std::filesystem::path config_path(config_path_str);
@@ -69,7 +74,7 @@ int main(int argc, char *argv[])
         "Logging level set to: {}",
         spdlog::level::to_string_view(config_result.value().global_settings.log_level)
     );
-    spdlog::info("Mounting DistributedCacheFS at: {}", mount_point_str);
+    spdlog::info("Mounting {} at {}", mount_point_str, DistributedCacheFS::Constants::APP_NAME);
     spdlog::info("Using Node ID: {}", config_result.value().node_id);
 
     // Setup Filesystem Context
@@ -106,7 +111,7 @@ int main(int argc, char *argv[])
 
     // TODO: Shutdown components before exit
 
-    spdlog::info("DistributedCacheFS shutting down.");
+    spdlog::info("{} exiting...", DistributedCacheFS::Constants::APP_NAME);
     spdlog::shutdown();
 
     return fuse_ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
