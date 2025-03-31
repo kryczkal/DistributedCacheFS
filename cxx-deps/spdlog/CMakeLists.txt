@@ -18,7 +18,7 @@ add_library(
     INTERFACE
 )
 
-target_include_directories(
+target_link_libraries(
     libSpdlog
     INTERFACE
         spdlog::spdlog

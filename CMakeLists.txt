@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.30)
 set(PROJECT_NAME "DistributedCacheFS")
-set(PROJECT_DESCRIPTION "")
+set(PROJECT_DESCRIPTION "Distributed Cache File System")
 set(PROJECT_VERSION "0.1.0")
 
 project(${PROJECT_NAME} VERSION ${PROJECT_VERSION} DESCRIPTION ${PROJECT_DESCRIPTION} LANGUAGES CXX)
@@ -29,6 +29,8 @@ file(GLOB_RECURSE
     src/*.hpp
     src/main.cpp
 )
+
+message(STATUS "Source Files: ${SRC_FILES}")
 
 # ------------------------------------------------------------------------------ #
 #  Executable
