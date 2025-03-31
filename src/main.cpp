@@ -29,7 +29,7 @@ int main(int argc, char *argv[])
     }
     spdlog::info("DistributedCacheFS starting...");
 
-    // --- Basic Argument Parsing ---
+    // Basic Argument Parsing
     std::vector<std::string> args(argv, argv + argc);
     std::string config_path_str;
     std::string mount_point_str;
@@ -41,8 +41,7 @@ int main(int argc, char *argv[])
             config_path_str = args[++i];
         } else if (args[i] == "-h" || args[i] == "--help") {
             std::cout << "Usage: " << argv[0] << " <mountpoint> -c <config_file> [FUSE options]\n";
-            // TODO: Consider using a proper argument parsing library later (e.g.,
-            // CLI11, argparse)
+            // TODO: Consider using a proper argument parsing library later
             return EXIT_SUCCESS;
         } else if (!args[i].empty() && args[i][0] == '-') {
             // Pass FUSE options through
@@ -69,7 +68,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // --- Load Configuration ---
+    // Load Configuration
     std::filesystem::path config_path(config_path_str);
     auto config_result = DistributedCacheFS::Config::loadConfigFromFileVerbose(config_path);
 
@@ -78,7 +77,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // --- Initialize Logging Level from Config ---
+    // Initialize Logging Level from Config
     spdlog::set_level(config_result.value().global_settings.log_level);
     spdlog::info(
         "Logging level set to: {}",
@@ -87,14 +86,11 @@ int main(int argc, char *argv[])
     spdlog::info("Mounting DistributedCacheFS at: {}", mount_point_str);
     spdlog::info("Using Node ID: {}", config_result.value().node_id);
 
-    // --- Setup Filesystem Context ---
+    // Setup Filesystem Context
     auto context    = std::make_unique<DistributedCacheFS::FileSystemContext>();
     context->config = std::move(config_result.value());  // Move config into context
 
-    // --- TODO: Initialize StorageManager, NodeManager etc. and add to context
-    // --- context->storage_manager = new
-    // Storage::StorageManager(context->config.storages);
-    // context->storage_manager->initialize_all(); // Example initialization
+    // TODO: Initialize StorageManager, NodeManager etc. and add to context
 
     // --- Initialize FUSE Operations ---
     // Ensure ops struct has static duration or lives longer than fuse_main
@@ -107,10 +103,6 @@ int main(int argc, char *argv[])
     spdlog::info("FUSE main loop finished with code: {}", fuse_ret);
 
     // --- TODO: Shutdown components before exit ---
-    // if (context->storage_manager) {
-    //     context->storage_manager->shutdown_all();
-    //     delete context->storage_manager;
-    // }
 
     spdlog::info("DistributedCacheFS shutting down.");
     spdlog::shutdown();
