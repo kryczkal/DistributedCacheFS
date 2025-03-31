@@ -7,15 +7,15 @@ pkg_check_modules(FUSE REQUIRED fuse3)
 #  Interface library
 # ------------------------------------------------------------------------------ #
 
-add_library(libfuse3 INTERFACE)
+add_library(libFuse3 INTERFACE)
 target_include_directories(
-    libfuse3
+    libFuse3
     INTERFACE
         ${FUSE_INCLUDE_DIRS}
 )
 
 target_link_libraries(
-    libfuse3
+    libFuse3
     INTERFACE
         ${FUSE_LIBRARIES}
 )

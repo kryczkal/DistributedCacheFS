@@ -14,12 +14,12 @@ FetchContent_MakeAvailable(spdlog)
 # ------------------------------------------------------------------------------ #
 
 add_library(
-    libspdlog
+    libSpdlog
     INTERFACE
 )
 
 target_include_directories(
-    libspdlog
+    libSpdlog
     INTERFACE
-        ${spdlog_SOURCE_DIR}/include
+        spdlog::spdlog
 )

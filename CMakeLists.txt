@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.30)
-set(PROJECT_NAME "CachingFS")
-set(PROJECT_DESCRIPTION "Caching File System")
+set(PROJECT_NAME "DistributedCacheFS")
+set(PROJECT_DESCRIPTION "")
 set(PROJECT_VERSION "0.1.0")
 
 project(${PROJECT_NAME} VERSION ${PROJECT_VERSION} DESCRIPTION ${PROJECT_DESCRIPTION} LANGUAGES CXX)
@@ -27,7 +27,7 @@ file(GLOB_RECURSE
     SRC_FILES
     src/*.cpp
     src/*.hpp
-    main.cpp
+    src/main.cpp
 )
 
 # ------------------------------------------------------------------------------ #
@@ -52,17 +52,8 @@ target_include_directories(
 target_link_libraries(
         ${PROJECT_NAME}
         PRIVATE
-        libnlohmann_json
-)
+        libFuse3
+        libJson
+        libSpdlog
 
-target_link_libraries(
-        ${PROJECT_NAME}
-        PRIVATE
-        libfuse3
-)
-
-target_link_libraries(
-        ${PROJECT_NAME}
-        PRIVATE
-        libspdlog
 )
