@@ -57,5 +57,6 @@ target_link_libraries(
         libFuse3
         libJson
         libSpdlog
+        libCli11
 
 )

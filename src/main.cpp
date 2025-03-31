@@ -7,7 +7,9 @@
 #include <fuse3/fuse.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include <CLI/CLI.hpp>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -15,11 +17,34 @@
 
 int main(int argc, char *argv[])
 {
+    // Command Line argument parsing
+    CLI::App app{"DistributedCacheFS - A FUSE-based distributed cache filesystem."};
+    app.allow_extras();
+
+    std::string config_path_str;
+    std::string mount_point_str;
+
+    app.add_option("-c,--config", config_path_str, "Path to the configuration JSON file")
+        ->required()
+        ->check(CLI::ExistingFile);
+
+    app.add_option("mountpoint", mount_point_str, "Path to the FUSE mount point")->required();
+
+    app.set_version_flag(
+        "-v,--version", "DistributedCacheFS version 0.1.0"
+    );  // TODO: Take this from cmake
+
+    try {
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError &e) {
+        return app.exit(e);
+    }
+
     // Initialize default logger (console) before config is parsed
     try {
         auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
         console_sink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [T:%t] [%^%l%$] [%n] %v");
-        auto main_logger = std::make_shared<spdlog::logger>("CacheFS", console_sink);
+        auto main_logger = std::make_shared<spdlog::logger>("DistributedCacheFS", console_sink);
         spdlog::set_default_logger(main_logger);
         spdlog::set_level(spdlog::level::info);
         spdlog::flush_on(spdlog::level::warn);
@@ -28,45 +53,6 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     spdlog::info("DistributedCacheFS starting...");
-
-    // Basic Argument Parsing
-    std::vector<std::string> args(argv, argv + argc);
-    std::string config_path_str;
-    std::string mount_point_str;
-    std::vector<char *> fuse_args;
-    fuse_args.push_back(argv[0]);  // Program name
-
-    for (size_t i = 1; i < args.size(); ++i) {
-        if ((args[i] == "-c" || args[i] == "--config") && i + 1 < args.size()) {
-            config_path_str = args[++i];
-        } else if (args[i] == "-h" || args[i] == "--help") {
-            std::cout << "Usage: " << argv[0] << " <mountpoint> -c <config_file> [FUSE options]\n";
-            // TODO: Consider using a proper argument parsing library later
-            return EXIT_SUCCESS;
-        } else if (!args[i].empty() && args[i][0] == '-') {
-            // Pass FUSE options through
-            fuse_args.push_back(argv[i]);
-            if ((args[i] == "-o" || args[i] == "-d" || args[i] == "-s") && i + 1 < args.size()) {
-                fuse_args.push_back(argv[++i]);
-            }
-        } else if (mount_point_str.empty()) {
-            // Assume first non-option is mount point
-            mount_point_str = args[i];
-            fuse_args.push_back(argv[i]);
-        } else {
-            spdlog::warn("Ignoring unrecognized argument: {}", args[i]);
-        }
-    }
-
-    if (mount_point_str.empty()) {
-        spdlog::critical("Error: Mount point not specified.");
-        std::cerr << "Usage: " << argv[0] << " <mountpoint> -c <config_file> [FUSE options]\n";
-        return EXIT_FAILURE;
-    }
-    if (config_path_str.empty()) {
-        spdlog::critical("Error: Config file path not specified (-c <config_file>).");
-        return EXIT_FAILURE;
-    }
 
     // Load Configuration
     std::filesystem::path config_path(config_path_str);
@@ -88,21 +74,37 @@ int main(int argc, char *argv[])
 
     // Setup Filesystem Context
     auto context    = std::make_unique<DistributedCacheFS::FileSystemContext>();
-    context->config = std::move(config_result.value());  // Move config into context
+    context->config = std::move(config_result.value());
 
     // TODO: Initialize StorageManager, NodeManager etc. and add to context
 
-    // --- Initialize FUSE Operations ---
+    // Construct arguments for fuse_main
+    std::vector<char *> fuse_argv;
+    fuse_argv.push_back(argv[0]);  // Program name
+
+    std::vector<std::string> remaining_args_storage = app.remaining();
+    for (const auto &arg : remaining_args_storage) {
+        fuse_argv.push_back(const_cast<char *>(arg.c_str()));
+    }
+    fuse_argv.push_back(const_cast<char *>(mount_point_str.c_str()));
+
+    spdlog::debug("Arguments passed to fuse_main:");
+    for (const char *arg : fuse_argv) {
+        if (arg) {
+            spdlog::debug("  '{}'", arg);
+        }
+    }
+    // Initialize FUSE Operations
     // Ensure ops struct has static duration or lives longer than fuse_main
     static fuse_operations fs_ops = DistributedCacheFS::FuseOps::get_fuse_operations();
 
-    // --- Start FUSE Main Loop ---
+    // Start FUSE Main Loop
     spdlog::info("Starting FUSE main loop...");
     int fuse_ret =
-        fuse_main(static_cast<int>(fuse_args.size()), fuse_args.data(), &fs_ops, context.get());
+        fuse_main(static_cast<int>(fuse_argv.size()), fuse_argv.data(), &fs_ops, context.get());
     spdlog::info("FUSE main loop finished with code: {}", fuse_ret);
 
-    // --- TODO: Shutdown components before exit ---
+    // TODO: Shutdown components before exit
 
     spdlog::info("DistributedCacheFS shutting down.");
     spdlog::shutdown();
