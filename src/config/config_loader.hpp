@@ -23,6 +23,10 @@ enum class LoadError {
 using LoadResult   = std::expected<NodeConfig, LoadError>;
 using LoadErrorMsg = std::expected<NodeConfig, std::string>;
 
+//------------------------------------------------------------------------------//
+// Loading Functions
+//------------------------------------------------------------------------------//
+
 LoadResult loadConfigFromFile(const std::filesystem::path &file_path);
 LoadErrorMsg loadConfigFromFileVerbose(const std::filesystem::path &file_path);
 
