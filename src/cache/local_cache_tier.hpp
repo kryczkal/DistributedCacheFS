@@ -58,6 +58,11 @@ class LocalCacheTier : public ICacheTier
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const override;
     StorageResult<void> UpdateAccessMeta(const std::filesystem::path& relative_path) override;
+    StorageResult<void> SetCacheMetadata(
+        const std::filesystem::path& relative_path, const CacheOriginMetadata& metadata
+    ) override;
+    StorageResult<CacheOriginMetadata> GetCacheMetadata(const std::filesystem::path& relative_path
+    ) const override;
 
     StorageResult<void> Initialize() override;
     StorageResult<void> Shutdown() override;
@@ -80,10 +85,19 @@ class LocalCacheTier : public ICacheTier
         const;
     void UpdateMetaOnWrite(const std::filesystem::path& full_path);
     void RemoveMeta(const std::filesystem::path& full_path);
+    StorageResult<void> SetXattr(
+        const std::filesystem::path& full_path, const char* key, const void* value, size_t size
+    );
+    StorageResult<std::vector<char>> GetXattr(
+        const std::filesystem::path& full_path, const char* key
+    ) const;
+    StorageResult<void> RemoveXattr(const std::filesystem::path& full_path, const char* key);
 
     //------------------------------------------------------------------------------//
     // Private Fields
     //------------------------------------------------------------------------------//
+    static const char* XATTR_ORIGIN_MTIME_KEY;
+    static const char* XATTR_ORIGIN_SIZE_KEY;
 
     const Config::CacheTierDefinition definition_;
     std::filesystem::path base_path_;

@@ -31,6 +31,8 @@ enum class StorageErrc {
     EvictionError,     // Failed to evict items to make space
     CoherencyError,    // Cache data is known to be stale or inconsistent
     OriginError,       // Error interacting with the origin filesystem
+    MetadataNotFound,  // Required metadata (e.g., xattrs) not found for cache entry
+    MetadataError,     // Error reading or writing metadata (e.g., xattrs)
     UnknownError,      // An unspecified error occurred
 };
 // clang-format on
@@ -74,13 +76,17 @@ class StorageErrorCategory : public std::error_category
             case StorageErrc::InvalidPath:
                 return "Invalid path";
             case StorageErrc::CacheMiss:
-                return "Item not found in cache";  // Internal?
+                return "Item not found in cache";
             case StorageErrc::EvictionError:
                 return "Cache eviction failed";
             case StorageErrc::CoherencyError:
                 return "Cache coherency error";
             case StorageErrc::OriginError:
                 return "Origin filesystem error";
+            case StorageErrc::MetadataNotFound:
+                return "Metadata not found for cache entry";
+            case StorageErrc::MetadataError:
+                return "Error reading or writing metadata";
             case StorageErrc::UnknownError:
                 return "Unknown storage/cache error";
             default:
@@ -140,6 +146,10 @@ int StorageResultToErrno(const StorageResult<T>& result)
                     return -EISDIR;
                 case StorageErrc::NotEmpty:
                     return -ENOTEMPTY;
+                case StorageErrc::MetadataNotFound:
+                    return -ENOENT;
+                case StorageErrc::MetadataError:
+                    return -EIO;  // Treat metadata error as I/O error
                 case StorageErrc::InvalidPath:
                     return -EINVAL;  // Or ENOENT
                     // Internal/Cache specific errors might not map directly

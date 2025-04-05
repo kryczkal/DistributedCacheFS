@@ -175,11 +175,19 @@ StorageResult<struct stat> CacheCoordinator::GetAttributes(const std::filesystem
         "GetAttributes called for: {} (relative: {})", fuse_path.string(), relative_path.string()
     );
 
+    // Fetch Origin Attributes
+    auto origin_attr_res = origin_manager_->GetOrigin()->GetAttributes(relative_path);
+    if (!origin_attr_res) {
+        spdlog::error(
+            "GetAttributes failed for {}: Origin lookup error {}", relative_path.string(),
+            origin_attr_res.error().message()
+        );
+        return std::unexpected(origin_attr_res.error());
+    }
+    const struct stat& origin_stat = origin_attr_res.value();
+
     // Check Cache
     auto cache_loc_res = FindInCache(relative_path);
-
-    // Fetch Origin Attributes (always needed for coherency check or if missed)
-    auto origin_attr_res = origin_manager_->GetOrigin()->GetAttributes(relative_path);
 
     if (cache_loc_res) {
         // Cache Hit
@@ -224,17 +232,7 @@ StorageResult<struct stat> CacheCoordinator::GetAttributes(const std::filesystem
         // Fall through to return origin attributes (if origin lookup succeeded)
     }
 
-    // Return Origin Attributes if lookup succeeded (either cache miss or stale cache)
-    if (origin_attr_res) {
-        return origin_attr_res.value();
-    } else {
-        // Origin lookup failed, and either cache miss or stale cache invalidated
-        spdlog::error(
-            "GetAttributes failed for {}: Origin lookup error {}", relative_path.string(),
-            origin_attr_res.error().message()
-        );
-        return std::unexpected(origin_attr_res.error());  // Propagate origin error
-    }
+    return origin_stat;
 }
 
 StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheCoordinator::ListDirectory(
@@ -282,11 +280,11 @@ StorageResult<size_t> CacheCoordinator::ReadFile(
     // Check Cache
     auto cache_loc_res = FindInCache(relative_path);
 
+    bool use_cache = false;
     if (cache_loc_res) {
         const auto& location = cache_loc_res.value();
         spdlog::trace("Cache hit for ReadFile: tier {}", location.tier_level);
 
-        bool use_cache       = false;
         auto origin_attr_res = origin_manager_->GetOrigin()->GetAttributes(relative_path);
 
         if (!origin_attr_res) {
@@ -295,6 +293,7 @@ StorageResult<size_t> CacheCoordinator::ReadFile(
                 "ReadFile cache hit but origin GetAttributes failed for {}: {}. Failing read.",
                 relative_path.string(), origin_attr_res.error().message()
             );
+            InvalidateCacheEntry(relative_path);
             return std::unexpected(make_error_code(StorageErrc::OriginError));
 
         } else {
@@ -348,8 +347,12 @@ StorageResult<size_t> CacheCoordinator::ReadFile(
         }
     }
 
-    spdlog::trace("Cache miss/stale for ReadFile: {}", relative_path.string());
-    return FetchAndCache(relative_path, offset, buffer);
+    if (!use_cache) {
+        spdlog::trace("Cache miss for ReadFile: {}. Fetching from origin.", relative_path.string());
+        return FetchAndCache(relative_path, offset, buffer);
+    }
+
+    return std::unexpected(make_error_code(StorageErrc::IOError));
 }
 
 StorageResult<size_t> CacheCoordinator::WriteFile(
@@ -595,6 +598,16 @@ StorageResult<size_t> CacheCoordinator::FetchAndCache(
 {
     spdlog::trace("FetchAndCache: Fetching origin data for {}", relative_path.string());
 
+    auto origin_attr_res = origin_manager_->GetOrigin()->GetAttributes(relative_path);
+    if (!origin_attr_res) {
+        spdlog::error(
+            "FetchAndCache: Origin GetAttributes failed for {}: {}", relative_path.string(),
+            origin_attr_res.error().message()
+        );
+        return std::unexpected(origin_attr_res.error());
+    }
+    const struct stat& origin_stat = origin_attr_res.value();
+
     // Fetch from Origin (TODO: Fetch strategy - whole file or just requested chunk?)
     // Fetch the requested chunk directly into the user's buffer
     auto origin_read_res = origin_manager_->GetOrigin()->Read(relative_path, offset, buffer);
@@ -620,7 +633,8 @@ StorageResult<size_t> CacheCoordinator::FetchAndCache(
     // Select Cache Tier
     // TODO: Improve selection
     // For now, pick the highest priority (lowest number) tier.
-    auto target_tier_res = SelectCacheTierForWrite(relative_path, bytes_read_from_origin);
+    size_t required_space = static_cast<size_t>(origin_stat.st_size);
+    auto target_tier_res  = SelectCacheTierForWrite(relative_path, required_space);
     if (!target_tier_res) {
         spdlog::warn(
             "FetchAndCache: No suitable cache tier found to store {}. Serving from origin only.",
@@ -663,12 +677,30 @@ StorageResult<size_t> CacheCoordinator::FetchAndCache(
             "FetchAndCache: Successfully wrote {} bytes to cache tier {} for {}",
             cache_write_res.value(), target_tier->GetTier(), relative_path.string()
         );
-        auto meta_update_res = target_tier->UpdateAccessMeta(relative_path);
+
+        CacheOriginMetadata meta_to_store;
+        meta_to_store.origin_mtime = origin_stat.st_mtime;
+        meta_to_store.origin_size  = origin_stat.st_size;
+        auto meta_update_res       = target_tier->SetCacheMetadata(relative_path, meta_to_store);
         if (!meta_update_res) {
             spdlog::trace(
                 "FetchAndCache: Failed to update access meta for {}: {}", relative_path.string(),
                 meta_update_res.error().message()
             );
+            InvalidateCacheEntry(relative_path);
+        } else {
+            spdlog::trace(
+                "FetchAndCache: Updated access meta for {} in cache tier {}",
+                relative_path.string(), target_tier->GetTier()
+            );
+            auto access_update_res = target_tier->UpdateAccessMeta(relative_path);
+            if (!access_update_res) {
+                spdlog::trace(
+                    "FetchAndCache: Failed to update access meta for {}: {}",
+                    relative_path.string(), access_update_res.error().message()
+                );
+                InvalidateCacheEntry(relative_path);
+            }
         }
     }
 
@@ -775,39 +807,56 @@ void CacheCoordinator::InvalidateCacheEntry(const std::filesystem::path& relativ
 }
 
 StorageResult<bool> CacheCoordinator::IsCacheValid(
-    const CacheLocation& location, const struct stat& origin_stat
+    const CacheLocation& location, const struct stat& current_origin_stat
 )
 {
     spdlog::trace("IsCacheValid checking for: {}", location.relative_path.string());
 
-    auto cached_attr_res = location.cache_tier->GetAttributes(location.relative_path);
-    if (!cached_attr_res) {
-        spdlog::warn(
-            "IsCacheValid: Failed to get attributes for cached item '{}' in tier {}: {}",
-            location.relative_path.string(), location.tier_level, cached_attr_res.error().message()
-        );
-        return std::unexpected(make_error_code(StorageErrc::CoherencyError));
-    }
-    const struct stat& cached_stat = cached_attr_res.value();
+    auto stored_meta_res = location.cache_tier->GetCacheMetadata(location.relative_path);
 
-    // Basic coherency check: Modification time and Size
-    if (cached_stat.st_mtime == origin_stat.st_mtime &&
-        cached_stat.st_size == origin_stat.st_size) {
+    if (!stored_meta_res) {
+        if (stored_meta_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
+            spdlog::warn(
+                "IsCacheValid: Metadata not found for cached item '{}' in tier {}. Treating as "
+                "STALE.",
+                location.relative_path.string(), location.tier_level
+            );
+            return false;  // Metadata missing = stale/invalid
+        } else {
+            spdlog::error(
+                "IsCacheValid: Failed to get stored metadata for cached item '{}' in tier {}: {}",
+                location.relative_path.string(), location.tier_level,
+                stored_meta_res.error().message()
+            );
+            // Error retrieving metadata, cannot determine validity
+            return std::unexpected(make_error_code(StorageErrc::MetadataError));
+        }
+    }
+
+    const CacheOriginMetadata& stored_metadata = stored_meta_res.value();
+
+    // Compare stored origin metadata with current origin metadata
+    bool mtime_match = (current_origin_stat.st_mtime == stored_metadata.origin_mtime);
+    bool size_match  = (current_origin_stat.st_size == stored_metadata.origin_size);
+
+    if (mtime_match && size_match) {
         spdlog::trace(
-            "IsCacheValid: Cache mtime ({}) and size ({}) match origin for {}. Valid.",
-            cached_stat.st_mtime, cached_stat.st_size, location.relative_path.string()
+            "IsCacheValid: Cache VALID for {}. Origin mtime ({}) and size ({}) match stored "
+            "metadata.",
+            location.relative_path.string(), current_origin_stat.st_mtime,
+            current_origin_stat.st_size
         );
         return true;
     } else {
         spdlog::info(
-            "IsCacheValid: Cache STALE for {}. Origin mtime: {}, size: {}. Cache mtime: {}, size: "
+            "IsCacheValid: Cache STALE for {}. Origin mtime: {}, size: {}. Stored mtime: {}, size: "
             "{}",
-            location.relative_path.string(), origin_stat.st_mtime, origin_stat.st_size,
-            cached_stat.st_mtime, cached_stat.st_size
+            location.relative_path.string(), current_origin_stat.st_mtime,
+            current_origin_stat.st_size, stored_metadata.origin_mtime, stored_metadata.origin_size
         );
         return false;
     }
-    // TODO: Add more sophisticated checks if needed (checksums?)
 }
+// TODO: Add more sophisticated checks if needed (checksums?)}
 
 }  // namespace DistributedCacheFS::Cache

@@ -26,10 +26,16 @@ using Storage::make_error_code;
 using Storage::StorageErrc;
 using Storage::StorageResult;
 
+struct CacheOriginMetadata {
+    time_t origin_mtime = 0;
+    off_t origin_size   = -1;
+};
+
 struct CacheItemInfo {
     std::filesystem::path relative_path;
     struct stat attributes;
     std::time_t last_accessed = 0;
+    std::optional<CacheOriginMetadata> origin_metadata;
 };
 
 // Interface for a Cache Storage Tier
@@ -72,6 +78,12 @@ class ICacheTier
     ) const = 0;
     // Update access time or other metadata for LRU etc.
     virtual StorageResult<void> UpdateAccessMeta(const std::filesystem::path& relative_path) = 0;
+    virtual StorageResult<void> SetCacheMetadata(
+        const std::filesystem::path& relative_path, const CacheOriginMetadata& metadata
+    ) = 0;
+    virtual StorageResult<CacheOriginMetadata> GetCacheMetadata(
+        const std::filesystem::path& relative_path
+    ) const = 0;
 
     // Initialization / Shutdown
     virtual StorageResult<void> Initialize() = 0;

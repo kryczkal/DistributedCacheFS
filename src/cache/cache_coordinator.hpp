@@ -129,7 +129,9 @@ class CacheCoordinator
     void InvalidateCacheEntry(const std::filesystem::path& relative_path);
 
     /// Check cache coherency
-    StorageResult<bool> IsCacheValid(const CacheLocation& location, const struct stat& origin_stat);
+    StorageResult<bool> IsCacheValid(
+        const CacheLocation& location, const struct stat& current_origin_stat
+    );
 
     /// Helper to sanitize fuse path
     std::filesystem::path SanitizeFusePath(const std::filesystem::path& fuse_path) const;

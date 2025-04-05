@@ -3,8 +3,10 @@
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -15,8 +17,38 @@
 namespace DistributedCacheFS::Cache
 {
 
+const char* LocalCacheTier::XATTR_ORIGIN_MTIME_KEY = "user.dcachefs.origin_mtime_sec";
+const char* LocalCacheTier::XATTR_ORIGIN_SIZE_KEY  = "user.dcachefs.origin_size";
+
 namespace  // Anonymous namespace
 {
+
+// Helper to convert errno from xattr calls to StorageErrc
+Storage::StorageErrc XattrErrnoToStorageErrc(int err_no)
+{
+    switch (err_no) {
+        case 0:
+            return Storage::StorageErrc::Success;
+        case ENOENT:
+            return Storage::StorageErrc::FileNotFound;  // Path not found
+        case ENODATA:
+            return Storage::StorageErrc::MetadataNotFound;  // Attribute not found
+        case EPERM:
+        case EACCES:
+            return Storage::StorageErrc::PermissionDenied;
+        case ENOSPC:
+            return Storage::StorageErrc::OutOfSpace;
+        case EOPNOTSUPP:
+            return Storage::StorageErrc::NotSupported;  // FS doesn't support xattrs or operation
+        case ERANGE:
+            return Storage::StorageErrc::MetadataError;
+        case EIO:
+            return Storage::StorageErrc::IOError;
+
+        default:
+            return Storage::StorageErrc::MetadataError;  // Treat other errors as metadata errors
+    }
+}
 
 Storage::StorageErrc ErrnoToStorageErrc(int err_no)
 {
@@ -33,7 +65,7 @@ Storage::StorageErrc ErrnoToStorageErrc(int err_no)
         case ENOSPC:
             return Storage::StorageErrc::OutOfSpace;
         case EINVAL:
-            return Storage::StorageErrc::InvalidOffset;  // Or InvalidPath etc.
+            return Storage::StorageErrc::InvalidOffset;
         case EEXIST:
             return Storage::StorageErrc::AlreadyExists;
         case ENOTDIR:
@@ -44,7 +76,7 @@ Storage::StorageErrc ErrnoToStorageErrc(int err_no)
             return Storage::StorageErrc::NotEmpty;
         case EOPNOTSUPP:
             return Storage::StorageErrc::NotSupported;
-        // Map more errors as needed
+
         default:
             return Storage::StorageErrc::UnknownError;
     }
@@ -94,6 +126,175 @@ class FileDescriptorGuard
 };
 
 }  // anonymous namespace
+
+StorageResult<void> LocalCacheTier::SetXattr(
+    const std::filesystem::path& full_path, const char* key, const void* value, size_t size
+)
+{
+    if (::setxattr(full_path.c_str(), key, value, size, 0) == -1) {
+        int xattr_errno = errno;
+        spdlog::warn(
+            "LocalCacheTier::SetXattr failed for key '{}' on '{}': {}", key, full_path.string(),
+            std::strerror(xattr_errno)
+        );
+        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
+    }
+    return {};
+}
+
+StorageResult<std::vector<char>> LocalCacheTier::GetXattr(
+    const std::filesystem::path& full_path, const char* key
+) const
+{
+    // First call to get size
+    ssize_t size = ::getxattr(full_path.c_str(), key, nullptr, 0);
+    if (size == -1) {
+        int xattr_errno = errno;
+        // Don't log error if attribute simply doesn't exist
+        if (xattr_errno != ENODATA) {
+            spdlog::trace(
+                "LocalCacheTier::GetXattr size check failed for key '{}' on '{}': {}", key,
+                full_path.string(), std::strerror(xattr_errno)
+            );
+        }
+        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
+    }
+    if (size == 0) {
+        return std::vector<char>();  // Empty attribute
+    }
+
+    // Allocate buffer and get value
+    std::vector<char> value(size);
+    size = ::getxattr(full_path.c_str(), key, value.data(), value.size());
+    if (size == -1) {
+        int xattr_errno = errno;
+        spdlog::warn(
+            "LocalCacheTier::GetXattr read failed for key '{}' on '{}': {}", key,
+            full_path.string(), std::strerror(xattr_errno)
+        );
+        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
+    }
+    // Should match the size from the first call
+    value.resize(size);
+    return value;
+}
+
+StorageResult<void> LocalCacheTier::RemoveXattr(
+    const std::filesystem::path& full_path, const char* key
+)
+{
+    if (::removexattr(full_path.c_str(), key) == -1) {
+        int xattr_errno = errno;
+        // Ignore error if attribute simply doesn't exist
+        if (xattr_errno != ENODATA) {
+            spdlog::warn(
+                "LocalCacheTier::RemoveXattr failed for key '{}' on '{}': {}", key,
+                full_path.string(), std::strerror(xattr_errno)
+            );
+            return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
+        }
+        spdlog::trace(
+            "LocalCacheTier::RemoveXattr: Attribute '{}' not found on '{}', ignoring.", key,
+            full_path.string()
+        );
+    }
+    return {};
+}
+
+StorageResult<void> LocalCacheTier::SetCacheMetadata(
+    const std::filesystem::path& relative_path, const CacheOriginMetadata& metadata
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    // Store mtime (seconds part)
+    std::string mtime_str = std::to_string(metadata.origin_mtime);
+    auto set_mtime_res =
+        SetXattr(full_path, XATTR_ORIGIN_MTIME_KEY, mtime_str.data(), mtime_str.size());
+    if (!set_mtime_res)
+        return std::unexpected(set_mtime_res.error());
+
+    // Store size
+    std::string size_str = std::to_string(metadata.origin_size);
+    auto set_size_res =
+        SetXattr(full_path, XATTR_ORIGIN_SIZE_KEY, size_str.data(), size_str.size());
+    if (!set_size_res) {
+        spdlog::error(
+            "SetCacheMetadata: Failed to set size xattr after setting mtime for {}",
+            full_path.string()
+        );
+        return std::unexpected(set_size_res.error());
+    }
+
+    spdlog::trace("SetCacheMetadata successful for {}", full_path.string());
+    return {};
+}
+
+StorageResult<CacheOriginMetadata> LocalCacheTier::GetCacheMetadata(
+    const std::filesystem::path& relative_path
+) const
+{
+    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    CacheOriginMetadata metadata;
+
+    // Get mtime
+    auto get_mtime_res = GetXattr(full_path, XATTR_ORIGIN_MTIME_KEY);
+    if (!get_mtime_res) {
+        if (get_mtime_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
+            spdlog::trace("GetCacheMetadata: Mtime xattr not found for {}", full_path.string());
+            return std::unexpected(make_error_code(StorageErrc::MetadataNotFound));
+        }
+        return std::unexpected(get_mtime_res.error());
+    }
+    try {
+        // Convert string back to time_t (long long)
+        std::string mtime_str(get_mtime_res.value().begin(), get_mtime_res.value().end());
+        metadata.origin_mtime = std::stoll(mtime_str);
+    } catch (const std::exception& e) {
+        spdlog::error(
+            "GetCacheMetadata: Failed to parse mtime xattr '{}' for {}: {}",
+            std::string(get_mtime_res.value().begin(), get_mtime_res.value().end()),
+            full_path.string(), e.what()
+        );
+        return std::unexpected(make_error_code(StorageErrc::MetadataError));
+    }
+
+    // Get size
+    auto get_size_res = GetXattr(full_path, XATTR_ORIGIN_SIZE_KEY);
+    if (!get_size_res) {
+        if (get_size_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
+            spdlog::trace("GetCacheMetadata: Size xattr not found for {}", full_path.string());
+            // If mtime was found but size wasn't, it's an inconsistent state
+            return std::unexpected(make_error_code(StorageErrc::MetadataNotFound));
+        }
+        return std::unexpected(get_size_res.error());
+    }
+    try {
+        // Convert string back to off_t (long long)
+        std::string size_str(get_size_res.value().begin(), get_size_res.value().end());
+        metadata.origin_size = std::stoll(size_str);  // Use stoll for off_t safety
+    } catch (const std::exception& e) {
+        spdlog::error(
+            "GetCacheMetadata: Failed to parse size xattr '{}' for {}: {}",
+            std::string(get_size_res.value().begin(), get_size_res.value().end()),
+            full_path.string(), e.what()
+        );
+        return std::unexpected(make_error_code(StorageErrc::MetadataError));
+    }
+
+    spdlog::trace(
+        "GetCacheMetadata successful for {}: mtime={}, size={}", full_path.string(),
+        metadata.origin_mtime, metadata.origin_size
+    );
+    return metadata;
+}
 
 LocalCacheTier::LocalCacheTier(const Config::CacheTierDefinition& definition)
     : definition_(definition), base_path_(definition.path)
@@ -409,6 +610,21 @@ StorageResult<void> LocalCacheTier::Remove(const std::filesystem::path& relative
         relative_path.string()
     );
 
+    auto rem_mtime_res = RemoveXattr(full_path, XATTR_ORIGIN_MTIME_KEY);
+    if (!rem_mtime_res && rem_mtime_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
+        spdlog::error(
+            "LocalCacheTier::Remove: Failed to remove mtime xattr for '{}': {}", full_path.string(),
+            rem_mtime_res.error().message()
+        );
+    }
+    auto rem_size_res = RemoveXattr(full_path, XATTR_ORIGIN_SIZE_KEY);
+    if (!rem_size_res && rem_size_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
+        spdlog::error(
+            "LocalCacheTier::Remove: Failed to remove size xattr for '{}': {}", full_path.string(),
+            rem_size_res.error().message()
+        );
+    }
+
     std::string full_path_str = full_path.string();
     std::string base_path_str = base_path_.string();
 
@@ -607,7 +823,6 @@ void LocalCacheTier::UpdateMetaOnWrite(const std::filesystem::path& full_path)
 {
     std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
     access_times_[full_path.string()] = std::time(nullptr);
-    // TODO: Update current_used_bytes_ if tracking dynamically
     spdlog::trace("Updated write/access meta for {}", full_path.string());
 }
 
