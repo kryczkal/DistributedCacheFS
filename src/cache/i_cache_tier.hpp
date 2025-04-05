@@ -1,4 +1,3 @@
-// === src/cache/ICacheTier.hpp ===
 #ifndef DISTRIBUTEDCACHEFS_SRC_CACHE_ICACHETIER_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_CACHE_ICACHETIER_HPP_
 
@@ -96,7 +95,6 @@ class ICacheTier
     virtual StorageResult<std::vector<CacheItemInfo>> ListCacheContents() const = 0;
 };
 
-// Concept check
 template <typename T>
 concept IsCacheTier = std::derived_from<T, ICacheTier>;
 

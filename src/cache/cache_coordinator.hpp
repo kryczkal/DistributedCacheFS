@@ -141,8 +141,8 @@ class CacheCoordinator
     //------------------------------------------------------------------------------//
 
     const Config::NodeConfig config_;
-    Origin::OriginManager* origin_manager_ = nullptr;  // Pointer, owned externally (by main)
-    TierCacheMap cache_tier_map_;                      // Map of cache tiers
+    Origin::OriginManager* origin_manager_ = nullptr;  ///< Pointer, owned externally (by main)
+    TierCacheMap cache_tier_map_;
     // TODO: Add metadata cache (e.g., map<path, cached_stat>)
     // TODO: Add eviction strategy object
 

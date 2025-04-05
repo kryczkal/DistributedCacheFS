@@ -49,7 +49,6 @@ int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/
         stbuf->st_atime = time(nullptr);
         stbuf->st_ctime = stbuf->st_atime;
     } else {
-        // Handle error
         spdlog::warn("FUSE getattr failed for path {}: {}", path, result.error().message());
         return Storage::StorageResultToErrno(result);
     }
@@ -67,7 +66,6 @@ int readdir(
     if (!coordinator)
         return -EIO;
 
-    // Add standard '.' and '..' entries
     filler(buf, ".", nullptr, 0, (fuse_fill_dir_flags)0);
     filler(buf, "..", nullptr, 0, (fuse_fill_dir_flags)0);
 
@@ -288,7 +286,6 @@ int read(const char *path, char *buf, size_t size, off_t offset, struct fuse_fil
     if (!coordinator)
         return -EIO;
 
-    // Create a span for the C-style buffer
     std::span<std::byte> buffer_span{reinterpret_cast<std::byte *>(buf), size};
 
     auto result = coordinator->ReadFile(path, offset, buffer_span);
@@ -297,7 +294,6 @@ int read(const char *path, char *buf, size_t size, off_t offset, struct fuse_fil
         return Storage::StorageResultToErrno(result);
     }
 
-    // Return the number of bytes read
     return static_cast<int>(result.value());
 }
 
@@ -310,7 +306,6 @@ int write(
     if (!coordinator)
         return -EIO;
 
-    // Create a const span for the C-style buffer
     std::span<const std::byte> data_span{reinterpret_cast<const std::byte *>(buf), size};
 
     auto result = coordinator->WriteFile(path, offset, data_span);
@@ -319,7 +314,6 @@ int write(
         return Storage::StorageResultToErrno(result);
     }
 
-    // Return the number of bytes written
     return static_cast<int>(result.value());
 }
 
@@ -337,7 +331,6 @@ int statfs(const char *path, struct statvfs *stbuf)
         return Storage::StorageResultToErrno(result);
     }
 
-    // Copy result to output buffer
     *stbuf = result.value();
     return 0;
 }
@@ -364,7 +357,7 @@ int fsync(const char *path, int isdatasync, struct fuse_file_info * /*fi*/)
     return 0;
 }
 
-// xattr operations - Not Implemented
+// xattr operations - TODO: Not Implemented
 int setxattr(const char *, const char *, const char *, size_t, int) { return -ENOSYS; }
 int getxattr(const char *, const char *, char *, size_t) { return -ENOSYS; }
 int listxattr(const char *, char *, size_t) { return -ENOSYS; }
