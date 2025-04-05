@@ -1,0 +1,175 @@
+#ifndef DISTRIBUTEDCACHEFS_SRC_STORAGE_STORAGE_ERROR_HPP_
+#define DISTRIBUTEDCACHEFS_SRC_STORAGE_STORAGE_ERROR_HPP_
+
+#include <expected>
+#include <string>
+#include <system_error>
+#include <type_traits>
+
+namespace DistributedCacheFS::Storage
+{
+
+//------------------------------------------------------------------------------//
+// Error Codes declared for Storage/Cache Operations
+//------------------------------------------------------------------------------//
+
+// clang-format off
+enum class StorageErrc {
+    Success = 0,       // Not an error
+    FileNotFound,      // Path does not exist (in cache or origin)
+    PermissionDenied,  // Operation not permitted
+    IOError,           // General I/O error during read/write/etc.
+    NotSupported,      // Operation is not supported by this storage type/backend
+    OutOfSpace,        // No space left on the storage medium (cache tier)
+    InvalidOffset,     // Invalid offset or size for read/write/truncate
+    AlreadyExists,     // Attempted to create something that already exists
+    NotADirectory,     // Expected a directory, found a file
+    IsADirectory,      // Expected a file, found a directory
+    NotEmpty,          // Attempted to remove a non-empty directory
+    InvalidPath,       // Path format or content is invalid for the storage
+    CacheMiss,         // Item not found in cache (internal signal, may not map to errno)
+    EvictionError,     // Failed to evict items to make space
+    CoherencyError,    // Cache data is known to be stale or inconsistent
+    OriginError,       // Error interacting with the origin filesystem
+    UnknownError,      // An unspecified error occurred
+};
+// clang-format on
+
+std::error_code make_error_code(StorageErrc e);
+
+//------------------------------------------------------------------------------//
+// Error Category Definition (Private Implementation Detail)
+//------------------------------------------------------------------------------//
+namespace detail
+{
+class StorageErrorCategory : public std::error_category
+{
+    public:
+    const char* name() const noexcept override { return "DistributedCacheFS::Storage"; }
+    std::string message(int ev) const override
+    {
+        switch (static_cast<StorageErrc>(ev)) {
+            case StorageErrc::Success:
+                return "Success";
+            case StorageErrc::FileNotFound:
+                return "File or directory not found";
+            case StorageErrc::PermissionDenied:
+                return "Permission denied";
+            case StorageErrc::IOError:
+                return "Input/output error";
+            case StorageErrc::NotSupported:
+                return "Operation not supported";
+            case StorageErrc::OutOfSpace:
+                return "No space left on device";
+            case StorageErrc::InvalidOffset:
+                return "Invalid offset or size";
+            case StorageErrc::AlreadyExists:
+                return "File or directory already exists";
+            case StorageErrc::NotADirectory:
+                return "Path is not a directory";
+            case StorageErrc::IsADirectory:
+                return "Path is a directory";
+            case StorageErrc::NotEmpty:
+                return "Directory not empty";
+            case StorageErrc::InvalidPath:
+                return "Invalid path";
+            case StorageErrc::CacheMiss:
+                return "Item not found in cache";  // Internal?
+            case StorageErrc::EvictionError:
+                return "Cache eviction failed";
+            case StorageErrc::CoherencyError:
+                return "Cache coherency error";
+            case StorageErrc::OriginError:
+                return "Origin filesystem error";
+            case StorageErrc::UnknownError:
+                return "Unknown storage/cache error";
+            default:
+                return "Unrecognized error code";
+        }
+    }
+};
+}  // namespace detail
+
+// Global instance of the category
+inline const detail::StorageErrorCategory storage_error_category;
+
+// Make the enum usable with std::error_code
+inline std::error_code make_error_code(StorageErrc e)
+{
+    return {static_cast<int>(e), storage_error_category};
+}
+
+//------------------------------------------------------------------------------//
+// Result Type Alias
+//------------------------------------------------------------------------------//
+template <typename T>
+using StorageResult = std::expected<T, std::error_code>;
+
+//------------------------------------------------------------------------------//
+// Helper Function to Convert StorageResult to FUSE errno
+//------------------------------------------------------------------------------//
+
+template <typename T>
+int StorageResultToErrno(const StorageResult<T>& result)
+{
+    if (result.has_value()) {
+        return 0;
+    } else {
+        const std::error_code& ec = result.error();
+        if (ec.category() == Storage::storage_error_category) {
+            switch (static_cast<StorageErrc>(ec.value())) {
+                case StorageErrc::Success:
+                    return 0;  // Should not happen in error case
+                case StorageErrc::FileNotFound:
+                    return -ENOENT;
+                case StorageErrc::PermissionDenied:
+                    return -EACCES;  // Or EPERM
+                case StorageErrc::IOError:
+                    return -EIO;
+                case StorageErrc::NotSupported:
+                    return -ENOSYS;  // Or EOPNOTSUPP
+                case StorageErrc::OutOfSpace:
+                    return -ENOSPC;
+                case StorageErrc::InvalidOffset:
+                    return -EINVAL;
+                case StorageErrc::AlreadyExists:
+                    return -EEXIST;
+                case StorageErrc::NotADirectory:
+                    return -ENOTDIR;
+                case StorageErrc::IsADirectory:
+                    return -EISDIR;
+                case StorageErrc::NotEmpty:
+                    return -ENOTEMPTY;
+                case StorageErrc::InvalidPath:
+                    return -EINVAL;  // Or ENOENT
+                    // Internal/Cache specific errors might not map directly
+                case StorageErrc::CacheMiss:
+                    return -ENOENT;  // Treat miss as not found externally
+                case StorageErrc::EvictionError:
+                    return -EIO;  // Map eviction failure to IO error
+                case StorageErrc::CoherencyError:
+                    return -EIO;  // Treat coherency issues as IO error
+                case StorageErrc::OriginError:
+                    return -EIO;                 // Treat origin issues as IO error
+                case StorageErrc::UnknownError:  // Fall through
+                default:
+                    return -EIO;  // Default to general I/O error
+            }
+        } else {
+            // If it's a generic error code (e.g., from std::filesystem)
+            return -ec.value();  // Return negative errno value
+        }
+    }
+}
+
+}  // namespace DistributedCacheFS::Storage
+
+// Enable std::error_code implicit conversion for StorageErrc
+namespace std
+{
+template <>
+struct is_error_code_enum<DistributedCacheFS::Storage::StorageErrc> : true_type {
+};
+}  // namespace std
+
+#endif  // DISTRIBUTEDCACHEFS_SRC_STORAGE_STORAGE_ERROR_HPP_

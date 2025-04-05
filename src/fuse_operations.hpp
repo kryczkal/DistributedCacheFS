@@ -1,16 +1,22 @@
 #ifndef DISTRIBUTEDCACHEFS_SRC_FUSE_OPERATIONS_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_FUSE_OPERATIONS_HPP_
 
+// clang-format off
+#include "app_constants.hpp"
 #include <fuse3/fuse.h>
+// clang-format on
+
+#include "cache/cache_coordinator.hpp"
 #include "config/config_types.hpp"
+#include "origin/origin_manager.hpp"
 
 namespace DistributedCacheFS
 {
 
 struct FileSystemContext {
     Config::NodeConfig config;
-    // TODO: pointers to storage managers etc. here later
-    // Storage::StorageManager* storage_manager = nullptr;
+    Origin::OriginManager *origin_manager      = nullptr;  // Owned by main
+    Cache::CacheCoordinator *cache_coordinator = nullptr;  // Owned by main
 };
 
 namespace FuseOps
@@ -18,6 +24,10 @@ namespace FuseOps
 
 inline FileSystemContext *get_context()
 {
+    if (!fuse_get_context() || !fuse_get_context()->private_data) {
+        spdlog::critical("FUSE context not initialized or private data missing!");
+        return nullptr;
+    }
     return static_cast<FileSystemContext *>(fuse_get_context()->private_data);
 }
 

@@ -54,6 +54,38 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
     // Parse Top-Level Keys
     TRY_ASSIGN_REQUIRED(config.node_id, j, "node_id", std::string);
 
+    // Parse Origin (Required)
+    if (!j.contains("origin") || !j.at("origin").is_object()) {
+        spdlog::error("'origin' object is missing or not an object.");
+        return std::unexpected(LoadError::ValidationError);
+    }
+    const auto &origin_json = j.at("origin");
+    {
+        std::string origin_type_str;
+        std::string origin_path_str;
+        TRY_ASSIGN_REQUIRED(origin_type_str, origin_json, "type", std::string);
+        TRY_ASSIGN_REQUIRED(origin_path_str, origin_json, "path", std::string);
+
+        auto origin_type_opt = StringToOriginType(origin_type_str);
+        if (!origin_type_opt) {
+            spdlog::error("Invalid 'type' value in origin definition: {}", origin_type_str);
+            return std::unexpected(LoadError::ValidationError);
+        }
+        config.origin.type = *origin_type_opt;
+        config.origin.path = origin_path_str;
+
+        // TODO: Parse other origin type specific parameters here
+        if (config.origin.type != OriginType::Local) {
+            spdlog::error("Only 'local' origin type is currently supported.");
+            return std::unexpected(LoadError::ValidationError);
+        }
+    }
+
+    if (!config.origin.isValid()) {
+        spdlog::error("Parsed origin definition is invalid.");
+        return std::unexpected(LoadError::ValidationError);
+    }
+
     // Parse Global Settings (Optional block)
     if (j.contains("global_settings")) {
         const auto &gs = j.at("global_settings");
@@ -73,81 +105,88 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
         }
         TRY_ASSIGN(config.global_settings.mdns_service_name, gs, "mdns_service_name", std::string);
         TRY_ASSIGN(config.global_settings.listen_port, gs, "listen_port", std::uint16_t);
+        // TODO: Parse cache-specific global settings
     }
 
-    // Parse Storages (Required Array)
-    if (!j.contains("storages") || !j.at("storages").is_array() || j.at("storages").empty()) {
-        spdlog::error("'storages' array is missing, not an array, or empty.");
+    // Parse Cache Tiers (Required Array)
+    if (!j.contains("cache_tiers") || !j.at("cache_tiers").is_array() ||
+        j.at("cache_tiers").empty()) {
+        spdlog::error("'cache_tiers' array is missing, not an array, or empty.");
         return std::unexpected(LoadError::ValidationError);
     }
 
     try {
-        for (const auto &item : j.at("storages")) {
+        for (const auto &item : j.at("cache_tiers")) {
             if (!item.is_object()) {
-                spdlog::error("Item in 'storages' array is not an object.");
+                spdlog::error("Item in 'cache_tiers' array is not an object.");
                 return std::unexpected(LoadError::ValidationError);
             }
 
-            StorageDefinition storage_def;
+            CacheTierDefinition tier_def;
             std::string path_str;
             TRY_ASSIGN_REQUIRED(path_str, item, "path", std::string);
-            storage_def.path = path_str;
+            tier_def.path = path_str;
 
-            TRY_ASSIGN_REQUIRED(storage_def.tier, item, "tier", int);
+            TRY_ASSIGN_REQUIRED(tier_def.tier, item, "tier", int);
 
             std::string type_str;
             TRY_ASSIGN_REQUIRED(type_str, item, "type", std::string);
-            auto type_opt = StringToStorageType(type_str);
+            auto type_opt = StringToCacheTierStorageType(type_str);
             if (!type_opt) {
-                spdlog::error("Invalid 'type' value in storage definition: {}", type_str);
+                spdlog::error("Invalid 'type' value in cache tier definition: {}", type_str);
                 return std::unexpected(LoadError::ValidationError);
             }
-            storage_def.type = *type_opt;
+            tier_def.type = *type_opt;
 
-            if (storage_def.type == StorageType::Shared) {
+            if (tier_def.type == CacheTierStorageType::Shared) {
                 std::string policy_str;
                 TRY_ASSIGN_REQUIRED(policy_str, item, "policy", std::string);
-                auto policy_opt = StringToSharedPolicy(policy_str);
+                auto policy_opt = StringToSharedCachePolicy(policy_str);
                 if (!policy_opt) {
-                    spdlog::error("Invalid 'policy' value for shared storage: {}", policy_str);
+                    spdlog::error("Invalid 'policy' value for shared cache tier: {}", policy_str);
                     return std::unexpected(LoadError::ValidationError);
                 }
-                storage_def.policy = *policy_opt;
+                tier_def.policy = *policy_opt;
 
                 std::string group_str;
                 TRY_ASSIGN_REQUIRED(group_str, item, "share_group", std::string);
-                storage_def.share_group = group_str;
+                tier_def.share_group = group_str;
 
-                if (storage_def.policy == SharedPolicy::Divide) {
+                if (tier_def.policy == SharedCachePolicy::Divide) {
                     if (item.contains("min_size_gb")) {
-                        TRY_ASSIGN(storage_def.min_size_gb, item, "min_size_gb", double);
+                        TRY_ASSIGN(tier_def.min_size_gb, item, "min_size_gb", double);
                     }
                     if (item.contains("max_size_gb")) {
-                        TRY_ASSIGN(storage_def.max_size_gb, item, "max_size_gb", double);
+                        TRY_ASSIGN(tier_def.max_size_gb, item, "max_size_gb", double);
                     }
                 }
             }
-            if (!storage_def.isValid()) {
+
+            if (!tier_def.isValid()) {
                 spdlog::error(
-                    "Parsed storage definition is invalid for path: {}", storage_def.path.string()
+                    "Parsed cache tier definition is invalid for path: {}", tier_def.path.string()
                 );
                 return std::unexpected(LoadError::ValidationError);
             }
 
-            config.storages.push_back(std::move(storage_def));
+            config.cache_tiers.push_back(std::move(tier_def));
         }
     } catch (const nlohmann::json::exception &e) {
-        spdlog::error("JSON parse error within 'storages' array: {}", e.what());
+        spdlog::error("JSON parse error within 'cache_tiers' array: {}", e.what());
         return std::unexpected(LoadError::JsonParseError);
     }
 
-    // Final Config Validation
     if (!config.isValid()) {
         spdlog::error("Overall node configuration is invalid after parsing.");
         return std::unexpected(LoadError::ValidationError);
     }
 
     spdlog::info("Configuration loaded successfully for node_id: {}", config.node_id);
+    spdlog::info(
+        "Using origin: type='{}', path='{}'", OriginTypeToString(config.origin.type),
+        config.origin.path.string()
+    );
+    spdlog::info("Configured {} cache tiers.", config.cache_tiers.size());
     return config;
 }
 

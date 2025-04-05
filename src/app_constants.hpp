@@ -19,7 +19,7 @@ constexpr spdlog::level::level_enum DEFAULT_FLUSH_LEVEL = spdlog::level::warn;
 constexpr std::string_view DEFAULT_CONSOLE_LOG_PATTERN =
     "[%Y-%m-%d %H:%M:%S.%e] [ThreadID:%t] [%^%l%$] [%n] %v";
 
-// Networking & Service Discovery ---
+// Networking & Service Discovery
 constexpr std::string_view DEFAULT_MDNS_SERVICE_NAME = "_dcachefs._tcp";
 constexpr std::uint16_t DEFAULT_LISTEN_PORT          = 9876;
 

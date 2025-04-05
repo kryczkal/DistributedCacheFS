@@ -68,6 +68,35 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    // Setup Core Components
+    std::unique_ptr<DistributedCacheFS::Origin::OriginManager> origin_manager;
+    std::unique_ptr<DistributedCacheFS::Cache::CacheCoordinator> cache_coordinator;
+    try {
+        origin_manager =
+            std::make_unique<DistributedCacheFS::Origin::OriginManager>(config_result.value().origin
+            );
+        cache_coordinator = std::make_unique<DistributedCacheFS::Cache::CacheCoordinator>(
+            config_result.value(), origin_manager.get()
+        );
+    } catch (const std::exception &e) {
+        spdlog::critical("Error initializing components: {}", e.what());
+        return EXIT_FAILURE;
+    }
+
+    auto init_res = cache_coordinator->InitializeAll();
+    if (!init_res) {
+        spdlog::critical("Error initializing cache coordinator: {}", init_res.error().message());
+        if (cache_coordinator) {
+            auto shutdown_res = cache_coordinator->ShutdownAll();
+            if (!shutdown_res) {
+                spdlog::error(
+                    "Error shutting down cache coordinator: {}", shutdown_res.error().message()
+                );
+            }
+        }
+        return EXIT_FAILURE;
+    }
+
     // Initialize Logging Level from Config
     spdlog::set_level(config_result.value().global_settings.log_level);
     spdlog::info(
@@ -78,10 +107,10 @@ int main(int argc, char *argv[])
     spdlog::info("Using Node ID: {}", config_result.value().node_id);
 
     // Setup Filesystem Context
-    auto context    = std::make_unique<DistributedCacheFS::FileSystemContext>();
-    context->config = std::move(config_result.value());
-
-    // TODO: Initialize StorageManager, NodeManager etc. and add to context
+    auto context_ptr               = std::make_unique<DistributedCacheFS::FileSystemContext>();
+    context_ptr->config            = std::move(config_result.value());
+    context_ptr->origin_manager    = origin_manager.get();
+    context_ptr->cache_coordinator = cache_coordinator.get();
 
     // Construct arguments for fuse_main
     std::vector<char *> fuse_argv;
@@ -106,10 +135,20 @@ int main(int argc, char *argv[])
     // Start FUSE Main Loop
     spdlog::info("Starting FUSE main loop...");
     int fuse_ret =
-        fuse_main(static_cast<int>(fuse_argv.size()), fuse_argv.data(), &fs_ops, context.get());
+        fuse_main(static_cast<int>(fuse_argv.size()), fuse_argv.data(), &fs_ops, context_ptr.get());
     spdlog::info("FUSE main loop finished with code: {}", fuse_ret);
 
-    // TODO: Shutdown components before exit
+    spdlog::info("Shutting down components and cleaning up resources...");
+
+    if (cache_coordinator) {
+        auto shutdown_res = cache_coordinator->ShutdownAll();
+        if (!shutdown_res) {
+            spdlog::error(
+                "Error shutting down cache coordinator: {}", shutdown_res.error().message()
+            );
+        }
+    }
+    // origin_manager is automatically cleaned up by cache_coordinator
 
     spdlog::info("{} exiting...", DistributedCacheFS::Constants::APP_NAME);
     spdlog::shutdown();
