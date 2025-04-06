@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -229,7 +230,7 @@ StorageResult<void> LocalCacheTier::SetCacheMetadata(
         return std::unexpected(set_size_res.error());
     }
 
-    spdlog::trace("SetCacheMetadata successful for {}", full_path.string());
+    spdlog::trace("SetCacheMetadata (origin mtime/size) successful for {}", full_path.string());
     return {};
 }
 
@@ -249,12 +250,10 @@ StorageResult<CacheOriginMetadata> LocalCacheTier::GetCacheMetadata(
     if (!get_mtime_res) {
         if (get_mtime_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
             spdlog::trace("GetCacheMetadata: Mtime xattr not found for {}", full_path.string());
-            return std::unexpected(make_error_code(StorageErrc::MetadataNotFound));
         }
         return std::unexpected(get_mtime_res.error());
     }
     try {
-        // Convert string back to time_t (long long)
         std::string mtime_str(get_mtime_res.value().begin(), get_mtime_res.value().end());
         metadata.origin_mtime = std::stoll(mtime_str);
     } catch (const std::exception& e) {
@@ -271,15 +270,13 @@ StorageResult<CacheOriginMetadata> LocalCacheTier::GetCacheMetadata(
     if (!get_size_res) {
         if (get_size_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
             spdlog::trace("GetCacheMetadata: Size xattr not found for {}", full_path.string());
-            // If mtime was found but size wasn't, it's an inconsistent state
-            return std::unexpected(make_error_code(StorageErrc::MetadataNotFound));
         }
+        // If mtime was found but size wasn't, it's an inconsistent state
         return std::unexpected(get_size_res.error());
     }
     try {
-        // Convert string back to off_t (long long)
         std::string size_str(get_size_res.value().begin(), get_size_res.value().end());
-        metadata.origin_size = std::stoll(size_str);  // Use stoll for off_t safety
+        metadata.origin_size = std::stoll(size_str);
     } catch (const std::exception& e) {
         spdlog::error(
             "GetCacheMetadata: Failed to parse size xattr '{}' for {}: {}",
@@ -290,8 +287,8 @@ StorageResult<CacheOriginMetadata> LocalCacheTier::GetCacheMetadata(
     }
 
     spdlog::trace(
-        "GetCacheMetadata successful for {}: mtime={}, size={}", full_path.string(),
-        metadata.origin_mtime, metadata.origin_size
+        "GetCacheMetadata (origin mtime/size) successful for {}: mtime={}, size={}",
+        full_path.string(), metadata.origin_mtime, metadata.origin_size
     );
     return metadata;
 }
@@ -432,8 +429,7 @@ StorageResult<void> LocalCacheTier::Shutdown()
 {
     std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
     spdlog::debug("Shutting down LocalCacheTier for path: {}", base_path_.string());
-    // TODO: Clear cache metadata, close any open file descriptors, etc.
-    access_times_.clear();
+    // No specific action currently needed on shutdown
     return {};
 }
 
@@ -593,8 +589,6 @@ StorageResult<std::size_t> LocalCacheTier::Write(
         return std::unexpected(make_error_code(ErrnoToStorageErrc(write_errno)));
     }
 
-    UpdateMetaOnWrite(full_path);
-
     return static_cast<size_t>(bytes_written);
 }
 
@@ -644,7 +638,6 @@ StorageResult<void> LocalCacheTier::Remove(const std::filesystem::path& relative
             base_path_.string(), relative_path.string()
         );
         // TODO: Decide what invalidating '.' should mean. Maybe clear contents?
-        RemoveMeta(full_path);
         return {};
     }
 
@@ -662,9 +655,6 @@ StorageResult<void> LocalCacheTier::Remove(const std::filesystem::path& relative
             spdlog::trace("LocalCacheTier::Remove: Path '{}' did not exist.", full_path.string());
         }
     }
-
-    // Remove from internal tracking regardless of filesystem result
-    RemoveMeta(full_path);
 
     return {};
 }
@@ -694,9 +684,6 @@ StorageResult<void> LocalCacheTier::Truncate(const std::filesystem::path& relati
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(trunc_errno)));
     }
-
-    // Update meta (size changed)
-    UpdateMetaOnWrite(full_path);
 
     return {};
 }
@@ -749,19 +736,6 @@ StorageResult<struct stat> LocalCacheTier::GetAttributes(const std::filesystem::
     return stbuf;
 }
 
-/// This function needs to be called after successful reads by the CacheCoordinator
-StorageResult<void> LocalCacheTier::UpdateAccessMeta(const std::filesystem::path& relative_path)
-{
-    auto full_path = GetValidatedFullPath(relative_path);
-    if (full_path.empty())
-        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-    access_times_[full_path.string()] = std::time(nullptr);
-    spdlog::trace("Updated access time for {}", full_path.string());
-    return {};
-}
-
 // TODO: Implement this properly - needs directory iteration and stat
 StorageResult<std::vector<CacheItemInfo>> LocalCacheTier::ListCacheContents() const
 {
@@ -789,11 +763,17 @@ StorageResult<std::vector<CacheItemInfo>> LocalCacheTier::ListCacheContents() co
                     continue;
                 }
 
-                auto it = access_times_.find(entry.path().string());
-                if (it != access_times_.end()) {
-                    item.last_accessed = it->second;
+                auto origin_meta_res = GetCacheMetadata(item.relative_path);
+                if (origin_meta_res) {
+                    item.origin_metadata = *origin_meta_res;
                 } else {
-                    item.last_accessed = stbuf.st_atime;
+                    if (origin_meta_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
+                        spdlog::trace(
+                            "ListCacheContents: GetCacheMetadata failed for {}: {}",
+                            item.relative_path.string(), origin_meta_res.error().message()
+                        );
+                    }
+                    item.origin_metadata = std::nullopt;
                 }
                 contents.push_back(std::move(item));
 
@@ -815,27 +795,6 @@ StorageResult<std::vector<CacheItemInfo>> LocalCacheTier::ListCacheContents() co
     }
 
     return contents;
-}
-
-// Private Helpers
-
-void LocalCacheTier::UpdateMetaOnWrite(const std::filesystem::path& full_path)
-{
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-    access_times_[full_path.string()] = std::time(nullptr);
-    spdlog::trace("Updated write/access meta for {}", full_path.string());
-}
-
-void LocalCacheTier::RemoveMeta(const std::filesystem::path& full_path)
-{
-    // Called after Remove
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-    auto it = access_times_.find(full_path.string());
-    if (it != access_times_.end()) {
-        access_times_.erase(it);
-        spdlog::trace("Removed access meta for {}", full_path.string());
-    }
-    // TODO: Update current_used_bytes_ if tracking dynamically
 }
 
 }  // namespace DistributedCacheFS::Cache

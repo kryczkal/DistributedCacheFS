@@ -108,6 +108,24 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
         // TODO: Parse cache-specific global settings
     }
 
+    // Parse Cache Settings (Optional block, under top level)
+    if (j.contains("cache_settings")) {
+        const auto &cs = j.at("cache_settings");
+        if (!cs.is_object()) {
+            spdlog::error("'cache_settings' must be an object.");
+            return std::unexpected(LoadError::ValidationError);
+        }
+
+        TRY_ASSIGN(config.cache_settings.decay_constant, cs, "decay_constant", double);
+        if (config.cache_settings.decay_constant < 0.0) {
+            spdlog::error(
+                "Invalid 'decay_constant' value: {} (must be non-negative)",
+                config.cache_settings.decay_constant
+            );
+            return std::unexpected(LoadError::ValidationError);
+        }
+    }
+
     // Parse Cache Tiers (Required Array)
     if (!j.contains("cache_tiers") || !j.at("cache_tiers").is_array() ||
         j.at("cache_tiers").empty()) {

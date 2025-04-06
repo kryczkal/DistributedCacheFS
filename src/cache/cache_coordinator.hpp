@@ -9,13 +9,20 @@
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <chrono>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
+#include <shared_mutex>
 #include <span>
+#include <unordered_map>
 #include <vector>
+
+namespace fs = std::filesystem;
 
 namespace DistributedCacheFS::Cache
 {
@@ -36,6 +43,31 @@ class CacheCoordinator
     using CacheTierPtr = std::unique_ptr<ICacheTier>;
     using TierCacheMap =
         std::map<int, std::vector<CacheTierPtr>>;  ///< Map tier level -> list of tiers
+
+    /// Rich metadata stored centrally for each cached item
+    struct RichCacheItemInfo {
+        fs::path relative_path;
+        double cost               = 0.0;  /// Fetch cost
+        off_t size                = -1;   // Size (bytes)
+        std::time_t last_accessed = 0;
+        time_t origin_mtime       = 0;   // For validity checks
+        off_t origin_size         = -1;  // For validity checks
+        ICacheTier* current_tier  = nullptr;
+    };
+
+    // Entry for the eviction priority queue (min-heap)
+    // Using pair {Heat, Path}
+    using HeatEntry = std::pair<double, fs::path>;
+
+    // Custom comparator for the min-heap priority queue
+    struct HeatEntryCompare {
+        bool operator()(const HeatEntry& lhs, const HeatEntry& rhs) const
+        {
+            return lhs.first > rhs.first;  // Compare heats (min-heap)
+        }
+    };
+
+    using EvictionHeap = std::priority_queue<HeatEntry, std::vector<HeatEntry>, HeatEntryCompare>;
 
     public:
     //------------------------------------------------------------------------------//
@@ -108,33 +140,48 @@ class CacheCoordinator
     // Private Methods
     //------------------------------------------------------------------------------//
 
-    /// Find an item in any cache tier
-    StorageResult<CacheLocation> FindInCache(const std::filesystem::path& relative_path);
+    /// Find an item in any cache tier (checks physical presence)
+    StorageResult<CacheLocation> FindInCachePhysical(const fs::path& relative_path);
 
     /// Fetch from origin and store in an appropriate cache tier
     StorageResult<size_t> FetchAndCache(
-        const std::filesystem::path& relative_path, off_t offset,
+        const fs::path& relative_path, off_t offset,
         std::span<std::byte> buffer  ///< Buffer to potentially fill directly
     );
 
     /// Selects a cache tier for writing new data (based on tier prio, space)
     StorageResult<ICacheTier*> SelectCacheTierForWrite(
-        const std::filesystem::path& relative_path, size_t required_space
+        const fs::path& relative_path, size_t required_space
     );
 
-    /// Handles cache eviction if necessary
+    /// Handles cache eviction using heat policy
     StorageResult<void> EvictIfNeeded(ICacheTier* target_tier, size_t required_space);
 
-    /// Removes item from all cache tiers
-    void InvalidateCacheEntry(const std::filesystem::path& relative_path);
+    /// Removes item from cache tier AND internal metadata/heaps
+    void InvalidateCacheEntry(const fs::path& relative_path);
 
-    /// Check cache coherency
+    /// Check cache coherency using stored origin metadata
     StorageResult<bool> IsCacheValid(
-        const CacheLocation& location, const struct stat& current_origin_stat
+        const RichCacheItemInfo& item_info, const struct stat& current_origin_stat
     );
 
     /// Helper to sanitize fuse path
-    std::filesystem::path SanitizeFusePath(const std::filesystem::path& fuse_path) const;
+    fs::path SanitizeFusePath(const fs::path& fuse_path) const;
+
+    /// Calculate the heat value for an item
+    double CalculateHeat(const RichCacheItemInfo& info, std::time_t current_time) const;
+
+    /// Attempt to promote an item to a faster tier
+    void PromoteItem(const fs::path& relative_path, ICacheTier* current_tier);
+
+    /// Update heap entry (simplistic: re-insert)
+    void UpdateHeapEntry(const fs::path& relative_path, double new_heat, int tier_level);
+
+    /// Remove entry from metadata map and corresponding heap
+    void RemoveItemFromMetadataAndHeap(const fs::path& relative_path);
+
+    /// Find the next faster tier (lower number)
+    ICacheTier* FindNextFasterTier(int current_tier_level);
 
     //------------------------------------------------------------------------------//
     // Private Fields
@@ -142,11 +189,11 @@ class CacheCoordinator
 
     const Config::NodeConfig config_;
     Origin::OriginManager* origin_manager_ = nullptr;  ///< Pointer, owned externally (by main)
-    TierCacheMap cache_tier_map_;
-    // TODO: Add metadata cache (e.g., map<path, cached_stat>)
-    // TODO: Add eviction strategy object
-
-    std::recursive_mutex coordinator_mutex_;  // Protects internal state, tier map access
+    TierCacheMap cache_tier_map_;                      ///< Map tier level -> list of cache tiers
+    std::unordered_map<fs::path, RichCacheItemInfo> item_metadata_;
+    std::map<int, EvictionHeap> tier_eviction_heaps_;
+    mutable std::shared_mutex
+        metadata_heap_mutex_;  ///< Protects item_metadata_ and tier_eviction_heaps_
 
     //------------------------------------------------------------------------------//
     // Helpers
