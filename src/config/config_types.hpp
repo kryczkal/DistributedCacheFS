@@ -40,11 +40,16 @@ std::optional<spdlog::level::level_enum> StringToLogLevel(const std::string &lev
 // Structs for Configuration Types
 //------------------------------------------------------------------------------//
 
+struct CacheSettings {
+    double decay_constant = 0.0001;  ///< Decay constant per second
+
+    bool isValid() const;
+};
+
 struct GlobalSettings {
     spdlog::level::level_enum log_level = Constants::DEFAULT_LOG_LEVEL;
     std::string mdns_service_name       = std::string(Constants::DEFAULT_MDNS_SERVICE_NAME);
     std::uint16_t listen_port           = Constants::DEFAULT_LISTEN_PORT;
-    // TODO: Add cache-specific settings
 };
 
 struct OriginDefinition {
@@ -73,6 +78,7 @@ struct NodeConfig {
     std::string node_id;
     OriginDefinition origin;
     GlobalSettings global_settings;
+    CacheSettings cache_settings;
     std::vector<CacheTierDefinition> cache_tiers;
 
     bool isValid() const;
@@ -175,6 +181,14 @@ inline const char *SharedCachePolicyToString(SharedCachePolicy policy)
 // Implementation of Configuration Structs Functions
 //------------------------------------------------------------------------------//
 
+inline bool CacheSettings::isValid() const
+{
+    if (decay_constant <= 0) {
+        return false;
+    }
+    return true;
+}
+
 inline bool OriginDefinition::isValid() const
 {
     if (path.empty())
@@ -210,8 +224,9 @@ inline bool CacheTierDefinition::isValid() const
 
 inline bool NodeConfig::isValid() const
 {
-    if (node_id.empty() || cache_tiers.empty() || !origin.isValid())
+    if (node_id.empty() || cache_tiers.empty() || !origin.isValid() || !cache_settings.isValid()) {
         return false;
+    }
     for (const auto &tier_def : cache_tiers) {
         if (!tier_def.isValid()) {
             return false;

@@ -148,7 +148,6 @@ int main(int argc, char *argv[])
             );
         }
     }
-    // origin_manager is automatically cleaned up by cache_coordinator
 
     spdlog::info("{} exiting...", DistributedCacheFS::Constants::APP_NAME);
     spdlog::shutdown();

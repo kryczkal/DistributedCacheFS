@@ -2,7 +2,6 @@
 #define DISTRIBUTEDCACHEFS_SRC_CACHE_LOCAL_CACHE_TIER_HPP_
 
 #include <filesystem>
-#include <map>
 #include <mutex>
 #include <system_error>
 #include "cache/i_cache_tier.hpp"
@@ -11,7 +10,7 @@
 namespace DistributedCacheFS::Cache
 {
 
-// Implements ICacheTier using the local filesystem for caching
+/// Implements ICacheTier using the local filesystem for caching
 class LocalCacheTier : public ICacheTier
 {
     private:
@@ -41,8 +40,7 @@ class LocalCacheTier : public ICacheTier
     const std::filesystem::path& GetPath() const override { return base_path_; }
 
     StorageResult<std::uint64_t> GetCapacityBytes() const override;
-    StorageResult<std::uint64_t> GetUsedBytes(
-    ) const override;  // Needs calculation if not tracked live
+    StorageResult<std::uint64_t> GetUsedBytes() const override;
     StorageResult<std::uint64_t> GetAvailableBytes() const override;
 
     StorageResult<std::size_t> Read(
@@ -57,7 +55,6 @@ class LocalCacheTier : public ICacheTier
     StorageResult<bool> Probe(const std::filesystem::path& relative_path) const override;
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const override;
-    StorageResult<void> UpdateAccessMeta(const std::filesystem::path& relative_path) override;
     StorageResult<void> SetCacheMetadata(
         const std::filesystem::path& relative_path, const CacheOriginMetadata& metadata
     ) override;
@@ -83,8 +80,6 @@ class LocalCacheTier : public ICacheTier
     std::filesystem::path GetValidatedFullPath(const std::filesystem::path& relative_path) const;
     std::error_code MapFilesystemError(const std::error_code& ec, const std::string& operation = "")
         const;
-    void UpdateMetaOnWrite(const std::filesystem::path& full_path);
-    void RemoveMeta(const std::filesystem::path& full_path);
     StorageResult<void> SetXattr(
         const std::filesystem::path& full_path, const char* key, const void* value, size_t size
     );
@@ -102,7 +97,6 @@ class LocalCacheTier : public ICacheTier
     const Config::CacheTierDefinition definition_;
     std::filesystem::path base_path_;
     mutable std::recursive_mutex tier_mutex_;
-    std::map<std::string, std::time_t> access_times_;
 
     //------------------------------------------------------------------------------//
     // Helpers

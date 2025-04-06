@@ -30,10 +30,10 @@ struct CacheOriginMetadata {
     off_t origin_size   = -1;
 };
 
+// Basic info returned by ListCacheContents - potentially less rich than coordinators view
 struct CacheItemInfo {
     std::filesystem::path relative_path;
     struct stat attributes;
-    std::time_t last_accessed = 0;
     std::optional<CacheOriginMetadata> origin_metadata;
 };
 
@@ -69,17 +69,17 @@ class ICacheTier
         const std::filesystem::path& relative_path, off_t size
     ) = 0;
 
-    // Cache Metadata Management
-    // Check if an item exists in this specific cache tier
+    // Cache Metadata Management (Physical Tier level)
+    /// Check if an item exists physically in this specific cache tier
     virtual StorageResult<bool> Probe(const std::filesystem::path& relative_path) const = 0;
-    // Get attributes of the *cached* item
+    /// Get attributes of the cached item (stat call on cached file)
     virtual StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const = 0;
-    // Update access time or other metadata for LRU etc.
-    virtual StorageResult<void> UpdateAccessMeta(const std::filesystem::path& relative_path) = 0;
+    /// Set the origin metadata (mtime, size) physically with the cached file
     virtual StorageResult<void> SetCacheMetadata(
         const std::filesystem::path& relative_path, const CacheOriginMetadata& metadata
     ) = 0;
+    /// Get the origin metadata (mtime, size) physically stored with the cached file
     virtual StorageResult<CacheOriginMetadata> GetCacheMetadata(
         const std::filesystem::path& relative_path
     ) const = 0;
@@ -88,10 +88,10 @@ class ICacheTier
     virtual StorageResult<void> Initialize() = 0;
     virtual StorageResult<void> Shutdown()   = 0;
 
-    // Helper to get full path within the cache tier
+    /// Helper to get full path within the cache tier
     virtual std::filesystem::path GetFullPath(const std::filesystem::path& relative_path) const = 0;
 
-    // List items currently stored in this cache tier along with their metadata
+    /// List items currently stored in this cache tier along with their metadata
     virtual StorageResult<std::vector<CacheItemInfo>> ListCacheContents() const = 0;
 };
 
