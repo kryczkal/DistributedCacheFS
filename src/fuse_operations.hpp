@@ -6,7 +6,7 @@
 #include <fuse3/fuse.h>
 // clang-format on
 
-#include "cache/cache_coordinator.hpp"
+#include "cache/cache_manager.hpp"
 #include "config/config_types.hpp"
 #include "origin/origin_manager.hpp"
 
@@ -15,8 +15,8 @@ namespace DistributedCacheFS
 
 struct FileSystemContext {
     Config::NodeConfig config;
-    Origin::OriginManager *origin_manager      = nullptr;  // Owned by main
-    Cache::CacheCoordinator *cache_coordinator = nullptr;  // Owned by main
+    std::unique_ptr<Origin::OriginManager> origin_manager  = nullptr;
+    std::unique_ptr<Cache::CacheManager> cache_coordinator = nullptr;
 };
 
 namespace FuseOps

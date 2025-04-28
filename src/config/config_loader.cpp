@@ -68,7 +68,7 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
 
         auto origin_type_opt = StringToOriginType(origin_type_str);
         if (!origin_type_opt) {
-            spdlog::error("Invalid 'type' value in origin definition: {}", origin_type_str);
+            spdlog::error("Invalid 'type' heat in origin definition: {}", origin_type_str);
             return std::unexpected(LoadError::ValidationError);
         }
         config.origin.type = *origin_type_opt;
@@ -98,7 +98,7 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
         if (!log_level_str.empty()) {
             auto level_opt = StringToLogLevel(log_level_str);
             if (!level_opt) {
-                spdlog::error("Invalid 'log_level' value: {}", log_level_str);
+                spdlog::error("Invalid 'log_level' heat: {}", log_level_str);
                 return std::unexpected(LoadError::ValidationError);
             }
             config.global_settings.log_level = *level_opt;
@@ -119,7 +119,7 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
         TRY_ASSIGN(config.cache_settings.decay_constant, cs, "decay_constant", double);
         if (config.cache_settings.decay_constant < 0.0) {
             spdlog::error(
-                "Invalid 'decay_constant' value: {} (must be non-negative)",
+                "Invalid 'decay_constant' heat: {} (must be non-negative)",
                 config.cache_settings.decay_constant
             );
             return std::unexpected(LoadError::ValidationError);
@@ -127,20 +127,20 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
     }
 
     // Parse Cache Tiers (Required Array)
-    if (!j.contains("cache_tiers") || !j.at("cache_tiers").is_array() ||
-        j.at("cache_tiers").empty()) {
-        spdlog::error("'cache_tiers' array is missing, not an array, or empty.");
+    if (!j.contains("cache_definitions") || !j.at("cache_definitions").is_array() ||
+        j.at("cache_definitions").empty()) {
+        spdlog::error("'cache_definitions' array is missing, not an array, or empty.");
         return std::unexpected(LoadError::ValidationError);
     }
 
     try {
-        for (const auto &item : j.at("cache_tiers")) {
+        for (const auto &item : j.at("cache_definitions")) {
             if (!item.is_object()) {
-                spdlog::error("Item in 'cache_tiers' array is not an object.");
+                spdlog::error("Item in 'cache_definitions' array is not an object.");
                 return std::unexpected(LoadError::ValidationError);
             }
 
-            CacheTierDefinition tier_def;
+            StorageDefinition tier_def;
             std::string path_str;
             TRY_ASSIGN_REQUIRED(path_str, item, "path", std::string);
             tier_def.path = path_str;
@@ -151,17 +151,17 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
             TRY_ASSIGN_REQUIRED(type_str, item, "type", std::string);
             auto type_opt = StringToCacheTierStorageType(type_str);
             if (!type_opt) {
-                spdlog::error("Invalid 'type' value in cache tier definition: {}", type_str);
+                spdlog::error("Invalid 'type' heat in cache tier definition: {}", type_str);
                 return std::unexpected(LoadError::ValidationError);
             }
             tier_def.type = *type_opt;
 
-            if (tier_def.type == CacheTierStorageType::Shared) {
+            if (tier_def.type == StorageType::Shared) {
                 std::string policy_str;
                 TRY_ASSIGN_REQUIRED(policy_str, item, "policy", std::string);
                 auto policy_opt = StringToSharedCachePolicy(policy_str);
                 if (!policy_opt) {
-                    spdlog::error("Invalid 'policy' value for shared cache tier: {}", policy_str);
+                    spdlog::error("Invalid 'policy' heat for shared cache tier: {}", policy_str);
                     return std::unexpected(LoadError::ValidationError);
                 }
                 tier_def.policy = *policy_opt;
@@ -170,7 +170,7 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
                 TRY_ASSIGN_REQUIRED(group_str, item, "share_group", std::string);
                 tier_def.share_group = group_str;
 
-                if (tier_def.policy == SharedCachePolicy::Divide) {
+                if (tier_def.policy == SharedStorage::Divide) {
                     if (item.contains("min_size_gb")) {
                         TRY_ASSIGN(tier_def.min_size_gb, item, "min_size_gb", double);
                     }
@@ -187,10 +187,10 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
                 return std::unexpected(LoadError::ValidationError);
             }
 
-            config.cache_tiers.push_back(std::move(tier_def));
+            config.cache_definitions.push_back(std::move(tier_def));
         }
     } catch (const nlohmann::json::exception &e) {
-        spdlog::error("JSON parse error within 'cache_tiers' array: {}", e.what());
+        spdlog::error("JSON parse error within 'cache_definitions' array: {}", e.what());
         return std::unexpected(LoadError::JsonParseError);
     }
 
@@ -204,7 +204,7 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
         "Using origin: type='{}', path='{}'", OriginTypeToString(config.origin.type),
         config.origin.path.string()
     );
-    spdlog::info("Configured {} cache tiers.", config.cache_tiers.size());
+    spdlog::info("Configured {} cache tiers.", config.cache_definitions.size());
     return config;
 }
 

@@ -13,7 +13,7 @@ The root JSON object must contain the following keys:
 -   `node_id` (string, **required**): A unique identifier for this node within the distributed system. Must be non-empty.
 -   `origin` (object, **required**): Defines the origin filesystem source where the original data resides.
 -   `global_settings` (object, *optional*): Contains global configuration parameters for the node.
--   `cache_tiers` (array, **required**): An array defining the cache storage tiers managed by this node. This array must contain at least one cache tier definition object.
+-   `cache_definitions` (array, **required**): An array defining the cache storage tiers managed by this node. This array must contain at least one cache tier definition object.
 
 ### `origin` Object
 
@@ -34,9 +34,9 @@ This optional object contains general settings for the node's operation.
 -   `listen_port` (number, *optional*, default: `9876`): The network port the node listens on for communication with other nodes.
 -   *(Note: Cache-specific global settings might be added here in the future)*.
 
-### `cache_tiers` Array
+### `cache_definitions` Array
 
-This required array contains one or more objects, each defining a cache storage tier managed by this node. Each object represents a `CacheTierDefinition` and has the following keys:
+This required array contains one or more objects, each defining a cache storage tier managed by this node. Each object represents a `StorageDefinition` and has the following keys:
 
 -   `path` (string, **required**): The absolute or relative filesystem path to the directory used for this cache tier. Must be non-empty.
 -   `tier` (number, **required**): An integer representing the priority tier of this cache storage. Lower numbers indicate higher priority (checked first for reads, potentially written to first). Must be 0 or greater.
@@ -79,7 +79,7 @@ If `type` is set to `"local"`, the fields `policy`, `share_group`, `min_size_gb`
     "log_level": "debug",
     "listen_port": 9877
   },
-  "cache_tiers": [
+  "cache_definitions": [
     {
       "path": "/mnt/nvme_cache",
       "tier": 0,
@@ -116,7 +116,7 @@ If `type` is set to `"local"`, the fields `policy`, `share_group`, `min_size_gb`
 ### Validation Notes
 -   The `node_id` must be non-empty.
 -   The `origin` object must be present and contain a valid `type` (currently only `"local"`) and a non-empty `path`.
--   The `cache_tiers` array must not be empty.
+-   The `cache_definitions` array must not be empty.
 -   Each cache tier definition must have a non-empty `path`, a non-negative `tier`, and a valid `type`.
 -   Cache tier definitions with `type: "shared"` must include a valid `policy` and a non-empty `share_group`.
 -   Cache tier definitions with `type: "local"` must *not* include `policy`, `share_group`, `min_size_gb`, or `max_size_gb`.

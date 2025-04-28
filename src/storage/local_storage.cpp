@@ -1,4 +1,5 @@
-#include "cache/local_cache_tier.hpp"
+#include "storage/local_storage.hpp"
+
 #include <fcntl.h>
 #include <spdlog/spdlog.h>
 #include <sys/stat.h>
@@ -15,11 +16,11 @@
 #include <string>
 #include <system_error>
 
-namespace DistributedCacheFS::Cache
+namespace DistributedCacheFS::Storage
 {
 
-const char* LocalCacheTier::XATTR_ORIGIN_MTIME_KEY = "user.dcachefs.origin_mtime_sec";
-const char* LocalCacheTier::XATTR_ORIGIN_SIZE_KEY  = "user.dcachefs.origin_size";
+const char* LocalStorage::XATTR_ORIGIN_MTIME_KEY = "user.dcachefs.origin_mtime_sec";
+const char* LocalStorage::XATTR_ORIGIN_SIZE_KEY  = "user.dcachefs.size";
 
 namespace  // Anonymous namespace
 {
@@ -128,14 +129,14 @@ class FileDescriptorGuard
 
 }  // anonymous namespace
 
-StorageResult<void> LocalCacheTier::SetXattr(
+StorageResult<void> LocalStorage::SetXattr(
     const std::filesystem::path& full_path, const char* key, const void* value, size_t size
 )
 {
     if (::setxattr(full_path.c_str(), key, value, size, 0) == -1) {
         int xattr_errno = errno;
         spdlog::warn(
-            "LocalCacheTier::SetXattr failed for key '{}' on '{}': {}", key, full_path.string(),
+            "LocalStorage::SetXattr failed for key '{}' on '{}': {}", key, full_path.string(),
             std::strerror(xattr_errno)
         );
         return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
@@ -143,7 +144,7 @@ StorageResult<void> LocalCacheTier::SetXattr(
     return {};
 }
 
-StorageResult<std::vector<char>> LocalCacheTier::GetXattr(
+StorageResult<std::vector<char>> LocalStorage::GetXattr(
     const std::filesystem::path& full_path, const char* key
 ) const
 {
@@ -154,7 +155,7 @@ StorageResult<std::vector<char>> LocalCacheTier::GetXattr(
         // Don't log error if attribute simply doesn't exist
         if (xattr_errno != ENODATA) {
             spdlog::trace(
-                "LocalCacheTier::GetXattr size check failed for key '{}' on '{}': {}", key,
+                "LocalStorage::GetXattr size check failed for key '{}' on '{}': {}", key,
                 full_path.string(), std::strerror(xattr_errno)
             );
         }
@@ -164,14 +165,14 @@ StorageResult<std::vector<char>> LocalCacheTier::GetXattr(
         return std::vector<char>();  // Empty attribute
     }
 
-    // Allocate buffer and get value
+    // Allocate buffer and get heat
     std::vector<char> value(size);
     size = ::getxattr(full_path.c_str(), key, value.data(), value.size());
     if (size == -1) {
         int xattr_errno = errno;
         spdlog::warn(
-            "LocalCacheTier::GetXattr read failed for key '{}' on '{}': {}", key,
-            full_path.string(), std::strerror(xattr_errno)
+            "LocalStorage::GetXattr read failed for key '{}' on '{}': {}", key, full_path.string(),
+            std::strerror(xattr_errno)
         );
         return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
     }
@@ -180,7 +181,7 @@ StorageResult<std::vector<char>> LocalCacheTier::GetXattr(
     return value;
 }
 
-StorageResult<void> LocalCacheTier::RemoveXattr(
+StorageResult<void> LocalStorage::RemoveXattr(
     const std::filesystem::path& full_path, const char* key
 )
 {
@@ -189,121 +190,21 @@ StorageResult<void> LocalCacheTier::RemoveXattr(
         // Ignore error if attribute simply doesn't exist
         if (xattr_errno != ENODATA) {
             spdlog::warn(
-                "LocalCacheTier::RemoveXattr failed for key '{}' on '{}': {}", key,
+                "LocalStorage::RemoveXattr failed for key '{}' on '{}': {}", key,
                 full_path.string(), std::strerror(xattr_errno)
             );
             return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
         }
         spdlog::trace(
-            "LocalCacheTier::RemoveXattr: Attribute '{}' not found on '{}', ignoring.", key,
+            "LocalStorage::RemoveXattr: Attribute '{}' not found on '{}', ignoring.", key,
             full_path.string()
         );
     }
     return {};
 }
 
-StorageResult<void> LocalCacheTier::SetCacheMetadata(
-    const std::filesystem::path& relative_path, const CacheOriginMetadata& metadata
-)
-{
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-    auto full_path = GetValidatedFullPath(relative_path);
-    if (full_path.empty())
-        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-
-    // Store mtime (seconds part)
-    std::string mtime_str = std::to_string(metadata.origin_mtime);
-    auto set_mtime_res =
-        SetXattr(full_path, XATTR_ORIGIN_MTIME_KEY, mtime_str.data(), mtime_str.size());
-    if (!set_mtime_res)
-        return std::unexpected(set_mtime_res.error());
-
-    // Store size
-    std::string size_str = std::to_string(metadata.origin_size);
-    auto set_size_res =
-        SetXattr(full_path, XATTR_ORIGIN_SIZE_KEY, size_str.data(), size_str.size());
-    if (!set_size_res) {
-        spdlog::error(
-            "SetCacheMetadata: Failed to set size xattr after setting mtime for {}",
-            full_path.string()
-        );
-        return std::unexpected(set_size_res.error());
-    }
-
-    spdlog::trace("SetCacheMetadata (origin mtime/size) successful for {}", full_path.string());
-    return {};
-}
-
-StorageResult<CacheOriginMetadata> LocalCacheTier::GetCacheMetadata(
-    const std::filesystem::path& relative_path
+std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::path& relative_path
 ) const
-{
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-    auto full_path = GetValidatedFullPath(relative_path);
-    if (full_path.empty())
-        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-
-    CacheOriginMetadata metadata;
-
-    // Get mtime
-    auto get_mtime_res = GetXattr(full_path, XATTR_ORIGIN_MTIME_KEY);
-    if (!get_mtime_res) {
-        if (get_mtime_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
-            spdlog::trace("GetCacheMetadata: Mtime xattr not found for {}", full_path.string());
-        }
-        return std::unexpected(get_mtime_res.error());
-    }
-    try {
-        std::string mtime_str(get_mtime_res.value().begin(), get_mtime_res.value().end());
-        metadata.origin_mtime = std::stoll(mtime_str);
-    } catch (const std::exception& e) {
-        spdlog::error(
-            "GetCacheMetadata: Failed to parse mtime xattr '{}' for {}: {}",
-            std::string(get_mtime_res.value().begin(), get_mtime_res.value().end()),
-            full_path.string(), e.what()
-        );
-        return std::unexpected(make_error_code(StorageErrc::MetadataError));
-    }
-
-    // Get size
-    auto get_size_res = GetXattr(full_path, XATTR_ORIGIN_SIZE_KEY);
-    if (!get_size_res) {
-        if (get_size_res.error() == make_error_code(StorageErrc::MetadataNotFound)) {
-            spdlog::trace("GetCacheMetadata: Size xattr not found for {}", full_path.string());
-        }
-        // If mtime was found but size wasn't, it's an inconsistent state
-        return std::unexpected(get_size_res.error());
-    }
-    try {
-        std::string size_str(get_size_res.value().begin(), get_size_res.value().end());
-        metadata.origin_size = std::stoll(size_str);
-    } catch (const std::exception& e) {
-        spdlog::error(
-            "GetCacheMetadata: Failed to parse size xattr '{}' for {}: {}",
-            std::string(get_size_res.value().begin(), get_size_res.value().end()),
-            full_path.string(), e.what()
-        );
-        return std::unexpected(make_error_code(StorageErrc::MetadataError));
-    }
-
-    spdlog::trace(
-        "GetCacheMetadata (origin mtime/size) successful for {}: mtime={}, size={}",
-        full_path.string(), metadata.origin_mtime, metadata.origin_size
-    );
-    return metadata;
-}
-
-LocalCacheTier::LocalCacheTier(const Config::CacheTierDefinition& definition)
-    : definition_(definition), base_path_(definition.path)
-{
-    if (base_path_.empty()) {
-        throw std::invalid_argument("LocalCacheTier requires a non-empty path.");
-    }
-    base_path_ = std::filesystem::absolute(base_path_).lexically_normal();
-    spdlog::debug("LocalCacheTier created for path: {}", base_path_.string());
-}
-
-std::filesystem::path LocalCacheTier::GetFullPath(const std::filesystem::path& relative_path) const
 {
     auto combined        = (base_path_ / relative_path).lexically_normal();
     std::string base_str = base_path_.string();
@@ -312,7 +213,7 @@ std::filesystem::path LocalCacheTier::GetFullPath(const std::filesystem::path& r
     }
     if (combined.string().rfind(base_str, 0) != 0 && combined != base_path_) {
         spdlog::warn(
-            "LocalCacheTier: Potential path traversal: relative='{}', combined='{}', base='{}'",
+            "LocalStorage: Potential path traversal: relative='{}', combined='{}', base='{}'",
             relative_path.string(), combined.string(), base_path_.string()
         );
         return {};
@@ -320,18 +221,17 @@ std::filesystem::path LocalCacheTier::GetFullPath(const std::filesystem::path& r
     return combined;
 }
 
-std::filesystem::path LocalCacheTier::GetValidatedFullPath(
-    const std::filesystem::path& relative_path
+std::filesystem::path LocalStorage::GetValidatedFullPath(const std::filesystem::path& relative_path
 ) const
 {
-    auto full_path = GetFullPath(relative_path);
+    auto full_path = RelativeToAbsPath(relative_path);
     if (full_path.empty()) {
         return {};
     }
     return full_path;
 }
 
-std::error_code LocalCacheTier::MapFilesystemError(
+std::error_code LocalStorage::MapFilesystemError(
     const std::error_code& ec, const std::string& operation
 ) const
 {
@@ -345,34 +245,34 @@ std::error_code LocalCacheTier::MapFilesystemError(
     }
     if (storage_errc == Storage::StorageErrc::UnknownError && ec.value() != 0) {
         spdlog::warn(
-            "LocalCacheTier::MapFilesystemError: Unmapped error during '{}': code={}, category={}, "
+            "LocalStorage::MapFilesystemError: Unmapped error during '{}': code={}, category={}, "
             "message='{}'",
             operation.empty() ? "op" : operation, ec.value(), ec.category().name(), ec.message()
         );
     } else {
         spdlog::trace(
-            "LocalCacheTier::MapFilesystemError: Mapped error during '{}': {} -> {}",
+            "LocalStorage::MapFilesystemError: Mapped error during '{}': {} -> {}",
             operation.empty() ? "op" : operation, ec.message(), static_cast<int>(storage_errc)
         );
     }
     return Storage::make_error_code(storage_errc);
 }
 
-// ICacheTier Implementation
+// IStorage Implementation
 
-StorageResult<void> LocalCacheTier::Initialize()
+StorageResult<void> LocalStorage::Initialize()
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     std::error_code ec;
 
     if (!std::filesystem::exists(base_path_, ec)) {
         spdlog::info(
-            "LocalCacheTier: Cache path '{}' does not exist, creating.", base_path_.string()
+            "LocalStorage: Cache path '{}' does not exist, creating.", base_path_.string()
         );
         if (!std::filesystem::create_directories(base_path_, ec)) {
             if (ec) {
                 spdlog::error(
-                    "LocalCacheTier: Failed create cache dir '{}': {}", base_path_.string(),
+                    "LocalStorage: Failed create cache dir '{}': {}", base_path_.string(),
                     ec.message()
                 );
                 return std::unexpected(MapFilesystemError(ec, "init_create_dir"));
@@ -380,7 +280,7 @@ StorageResult<void> LocalCacheTier::Initialize()
             // If no error, check again (race?)
             if (!std::filesystem::is_directory(base_path_, ec)) {
                 spdlog::error(
-                    "LocalCacheTier: Failed verify cache dir '{}' after creation.",
+                    "LocalStorage: Failed verify cache dir '{}' after creation.",
                     base_path_.string()
                 );
                 return std::unexpected(MapFilesystemError(
@@ -390,34 +290,29 @@ StorageResult<void> LocalCacheTier::Initialize()
         }
         if (ec) {
             spdlog::error(
-                "LocalCacheTier: Failed create cache dir '{}': {}", base_path_.string(),
-                ec.message()
+                "LocalStorage: Failed create cache dir '{}': {}", base_path_.string(), ec.message()
             );
             return std::unexpected(MapFilesystemError(ec, "init_create_dir"));
         }
-        spdlog::info(
-            "LocalCacheTier: Successfully created cache directory: {}", base_path_.string()
-        );
+        spdlog::info("LocalStorage: Successfully created cache directory: {}", base_path_.string());
     } else if (ec) {
         spdlog::error(
-            "LocalCacheTier: Error checking cache path '{}': {}", base_path_.string(), ec.message()
+            "LocalStorage: Error checking cache path '{}': {}", base_path_.string(), ec.message()
         );
         return std::unexpected(MapFilesystemError(ec, "init_check_exists"));
     } else if (!std::filesystem::is_directory(base_path_, ec)) {
         spdlog::error(
-            "LocalCacheTier: Cache path '{}' exists but is not a directory.", base_path_.string()
+            "LocalStorage: Cache path '{}' exists but is not a directory.", base_path_.string()
         );
         return std::unexpected(make_error_code(StorageErrc::NotADirectory));
     } else if (ec) {
         spdlog::error(
-            "LocalCacheTier: Error checking cache path type '{}': {}", base_path_.string(),
+            "LocalStorage: Error checking cache path type '{}': {}", base_path_.string(),
             ec.message()
         );
         return std::unexpected(MapFilesystemError(ec, "init_check_type"));
     } else {
-        spdlog::info(
-            "LocalCacheTier initialized using existing directory: {}", base_path_.string()
-        );
+        spdlog::info("LocalStorage initialized using existing directory: {}", base_path_.string());
     }
 
     // TODO: Scan existing cache contents to populate initial metadata (access_times_, used_bytes_)
@@ -425,22 +320,22 @@ StorageResult<void> LocalCacheTier::Initialize()
     return {};
 }
 
-StorageResult<void> LocalCacheTier::Shutdown()
+StorageResult<void> LocalStorage::Shutdown()
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-    spdlog::debug("Shutting down LocalCacheTier for path: {}", base_path_.string());
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("Shutting down LocalStorage for path: {}", base_path_.string());
     // No specific action currently needed on shutdown
     return {};
 }
 
-StorageResult<std::uint64_t> LocalCacheTier::GetCapacityBytes() const
+StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     struct statvfs vfs_buf;
     if (::statvfs(base_path_.c_str(), &vfs_buf) == -1) {
         int stat_errno = errno;
         spdlog::error(
-            "LocalCacheTier::GetCapacityBytes: statvfs failed for '{}': {}", base_path_.string(),
+            "LocalStorage::GetCapacityBytes: statvfs failed for '{}': {}", base_path_.string(),
             std::strerror(stat_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
@@ -448,9 +343,9 @@ StorageResult<std::uint64_t> LocalCacheTier::GetCapacityBytes() const
     return static_cast<std::uint64_t>(vfs_buf.f_frsize) * vfs_buf.f_blocks;
 }
 
-StorageResult<std::uint64_t> LocalCacheTier::GetUsedBytes() const
+StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     // TODO: Implement accurate tracking.
     // For now, estimate based on capacity - available.
     auto capacity_res = GetCapacityBytes();
@@ -467,14 +362,14 @@ StorageResult<std::uint64_t> LocalCacheTier::GetUsedBytes() const
     }
 }
 
-StorageResult<std::uint64_t> LocalCacheTier::GetAvailableBytes() const
+StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     struct statvfs vfs_buf;
     if (::statvfs(base_path_.c_str(), &vfs_buf) == -1) {
         int stat_errno = errno;
         spdlog::error(
-            "LocalCacheTier::GetAvailableBytes: statvfs failed for '{}': {}", base_path_.string(),
+            "LocalStorage::GetAvailableBytes: statvfs failed for '{}': {}", base_path_.string(),
             std::strerror(stat_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
@@ -483,11 +378,11 @@ StorageResult<std::uint64_t> LocalCacheTier::GetAvailableBytes() const
     return static_cast<std::uint64_t>(vfs_buf.f_frsize) * vfs_buf.f_bavail;
 }
 
-StorageResult<std::size_t> LocalCacheTier::Read(
-    const std::filesystem::path& relative_path, off_t offset, std::span<std::byte> buffer
+StorageResult<std::size_t> LocalStorage::Read(
+    const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& buffer
 )
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -498,7 +393,7 @@ StorageResult<std::size_t> LocalCacheTier::Read(
     if (fd < 0) {
         int open_errno = errno;
         spdlog::trace(
-            "LocalCacheTier::Read open failed for '{}': {}", full_path.string(),
+            "LocalStorage::Read open failed for '{}': {}", full_path.string(),
             std::strerror(open_errno)
         );
         if (open_errno == EISDIR)
@@ -515,7 +410,7 @@ StorageResult<std::size_t> LocalCacheTier::Read(
     if (bytes_read < 0) {
         int read_errno = errno;
         spdlog::error(
-            "LocalCacheTier::Read pread failed for '{}': {}", full_path.string(),
+            "LocalStorage::Read pread failed for '{}': {}", full_path.string(),
             std::strerror(read_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(read_errno)));
@@ -524,11 +419,11 @@ StorageResult<std::size_t> LocalCacheTier::Read(
     return static_cast<size_t>(bytes_read);
 }
 
-StorageResult<std::size_t> LocalCacheTier::Write(
-    const std::filesystem::path& relative_path, off_t offset, std::span<const std::byte> data
+StorageResult<std::size_t> LocalStorage::Write(
+    const std::filesystem::path& relative_path, off_t offset, std::span<const std::byte>& data
 )
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -541,7 +436,7 @@ StorageResult<std::size_t> LocalCacheTier::Write(
         if (!std::filesystem::create_directories(parent_path, ec)) {
             if (ec || !std::filesystem::exists(parent_path)) {
                 spdlog::error(
-                    "LocalCacheTier::Write: Failed create parent cache dir '{}': {}",
+                    "LocalStorage::Write: Failed create parent cache dir '{}': {}",
                     parent_path.string(), ec ? ec.message() : "Unknown"
                 );
                 return std::unexpected(MapFilesystemError(
@@ -551,14 +446,14 @@ StorageResult<std::size_t> LocalCacheTier::Write(
         }
         if (ec) {
             spdlog::error(
-                "LocalCacheTier::Write: Failed create parent cache dir '{}': {}",
+                "LocalStorage::Write: Failed create parent cache dir '{}': {}",
                 parent_path.string(), ec.message()
             );
             return std::unexpected(MapFilesystemError(ec, "write_create_parent"));
         }
     } else if (ec) {
         spdlog::error(
-            "LocalCacheTier::Write: Failed check parent cache dir '{}': {}", parent_path.string(),
+            "LocalStorage::Write: Failed check parent cache dir '{}': {}", parent_path.string(),
             ec.message()
         );
         return std::unexpected(MapFilesystemError(ec, "write_check_parent"));
@@ -569,7 +464,7 @@ StorageResult<std::size_t> LocalCacheTier::Write(
     if (fd < 0) {
         int open_errno = errno;
         spdlog::error(
-            "LocalCacheTier::Write open failed for '{}': {}", full_path.string(),
+            "LocalStorage::Write open failed for '{}': {}", full_path.string(),
             std::strerror(open_errno)
         );
         if (open_errno == EISDIR)
@@ -583,7 +478,7 @@ StorageResult<std::size_t> LocalCacheTier::Write(
     if (bytes_written < 0) {
         int write_errno = errno;
         spdlog::error(
-            "LocalCacheTier::Write pwrite failed for '{}': {}", full_path.string(),
+            "LocalStorage::Write pwrite failed for '{}': {}", full_path.string(),
             std::strerror(write_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(write_errno)));
@@ -592,29 +487,29 @@ StorageResult<std::size_t> LocalCacheTier::Write(
     return static_cast<size_t>(bytes_written);
 }
 
-StorageResult<void> LocalCacheTier::Remove(const std::filesystem::path& relative_path)
+StorageResult<void> LocalStorage::Remove(const std::filesystem::path& relative_path)
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     spdlog::trace(
-        "LocalCacheTier::Remove called for: {} (relative: {})", full_path.string(),
+        "LocalStorage::Remove called for: {} (relative: {})", full_path.string(),
         relative_path.string()
     );
 
     auto rem_mtime_res = RemoveXattr(full_path, XATTR_ORIGIN_MTIME_KEY);
     if (!rem_mtime_res && rem_mtime_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
         spdlog::error(
-            "LocalCacheTier::Remove: Failed to remove mtime xattr for '{}': {}", full_path.string(),
+            "LocalStorage::Remove: Failed to remove mtime xattr for '{}': {}", full_path.string(),
             rem_mtime_res.error().message()
         );
     }
     auto rem_size_res = RemoveXattr(full_path, XATTR_ORIGIN_SIZE_KEY);
     if (!rem_size_res && rem_size_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
         spdlog::error(
-            "LocalCacheTier::Remove: Failed to remove size xattr for '{}': {}", full_path.string(),
+            "LocalStorage::Remove: Failed to remove size xattr for '{}': {}", full_path.string(),
             rem_size_res.error().message()
         );
     }
@@ -633,7 +528,7 @@ StorageResult<void> LocalCacheTier::Remove(const std::filesystem::path& relative
 
     if (full_path_str == base_path_str) {
         spdlog::trace(
-            "LocalCacheTier::Remove: Attempted to remove base path '{}' for relative path '{}'. "
+            "LocalStorage::Remove: Attempted to remove base path '{}' for relative path '{}'. "
             "Skipping deletion.",
             base_path_.string(), relative_path.string()
         );
@@ -647,21 +542,21 @@ StorageResult<void> LocalCacheTier::Remove(const std::filesystem::path& relative
         if (ec) {
             if (ec != std::errc::no_such_file_or_directory) {
                 spdlog::warn(
-                    "LocalCacheTier::Remove failed for '{}': {}", full_path.string(), ec.message()
+                    "LocalStorage::Remove failed for '{}': {}", full_path.string(), ec.message()
                 );
                 return std::unexpected(MapFilesystemError(ec, "remove"));
             }
         } else {
-            spdlog::trace("LocalCacheTier::Remove: Path '{}' did not exist.", full_path.string());
+            spdlog::trace("LocalStorage::Remove: Path '{}' did not exist.", full_path.string());
         }
     }
 
     return {};
 }
 
-StorageResult<void> LocalCacheTier::Truncate(const std::filesystem::path& relative_path, off_t size)
+StorageResult<void> LocalStorage::Truncate(const std::filesystem::path& relative_path, off_t size)
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -679,7 +574,7 @@ StorageResult<void> LocalCacheTier::Truncate(const std::filesystem::path& relati
         }
 
         spdlog::error(
-            "LocalCacheTier::Truncate failed for '{}': {}", full_path.string(),
+            "LocalStorage::Truncate failed for '{}': {}", full_path.string(),
             std::strerror(trunc_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(trunc_errno)));
@@ -688,9 +583,10 @@ StorageResult<void> LocalCacheTier::Truncate(const std::filesystem::path& relati
     return {};
 }
 
-StorageResult<bool> LocalCacheTier::Probe(const std::filesystem::path& relative_path) const
+StorageResult<bool> LocalStorage::CheckIfFileExists(const std::filesystem::path& relative_path
+) const
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -700,18 +596,18 @@ StorageResult<bool> LocalCacheTier::Probe(const std::filesystem::path& relative_
     bool exists = std::filesystem::exists(full_path, ec);
     if (ec) {
         spdlog::warn(
-            "LocalCacheTier::Probe: Error checking existence for '{}': {}", full_path.string(),
-            ec.message()
+            "LocalStorage::CheckIfFileExists: Error checking existence for '{}': {}",
+            full_path.string(), ec.message()
         );
         return std::unexpected(MapFilesystemError(ec, "probe"));
     }
     return exists;
 }
 
-StorageResult<struct stat> LocalCacheTier::GetAttributes(const std::filesystem::path& relative_path
+StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::path& relative_path
 ) const
 {
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -726,7 +622,7 @@ StorageResult<struct stat> LocalCacheTier::GetAttributes(const std::filesystem::
         }
 
         spdlog::warn(
-            "LocalCacheTier::GetAttributes: stat failed for '{}': {}", full_path.string(),
+            "LocalStorage::GetAttributes: stat failed for '{}': {}", full_path.string(),
             std::strerror(stat_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
@@ -736,65 +632,9 @@ StorageResult<struct stat> LocalCacheTier::GetAttributes(const std::filesystem::
     return stbuf;
 }
 
-// TODO: Implement this properly - needs directory iteration and stat
-StorageResult<std::vector<CacheItemInfo>> LocalCacheTier::ListCacheContents() const
+LocalStorage::LocalStorage(const Config::StorageDefinition& definition)
 {
-    std::vector<CacheItemInfo> contents;
-    std::lock_guard<std::recursive_mutex> lock(tier_mutex_);
-
-    std::error_code ec;
-    try {
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(
-                 base_path_, std::filesystem::directory_options::skip_permission_denied, ec
-             )) {
-            if (ec) {
-                spdlog::warn("ListCacheContents: Error iterating: {}", ec.message());
-                continue;
-            }
-            if (entry.is_regular_file(ec) && !ec) {
-                CacheItemInfo item;
-                item.relative_path = std::filesystem::relative(entry.path(), base_path_);
-
-                struct stat stbuf{};
-                if (::stat(entry.path().c_str(), &stbuf) == 0) {
-                    item.attributes = stbuf;
-                } else {
-                    spdlog::trace("ListCacheContents: stat failed for {}", entry.path().string());
-                    continue;
-                }
-
-                auto origin_meta_res = GetCacheMetadata(item.relative_path);
-                if (origin_meta_res) {
-                    item.origin_metadata = *origin_meta_res;
-                } else {
-                    if (origin_meta_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
-                        spdlog::trace(
-                            "ListCacheContents: GetCacheMetadata failed for {}: {}",
-                            item.relative_path.string(), origin_meta_res.error().message()
-                        );
-                    }
-                    item.origin_metadata = std::nullopt;
-                }
-                contents.push_back(std::move(item));
-
-            } else if (ec) {
-                spdlog::trace(
-                    "ListCacheContents: is_regular_file check failed for {}: {}",
-                    entry.path().string(), ec.message()
-                );
-                ec.clear();
-            }
-        }
-        if (ec) {
-            spdlog::error("ListCacheContents: Filesystem error after iteration: {}", ec.message());
-            return std::unexpected(MapFilesystemError(ec, "listcontents_end"));
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("ListCacheContents: Exception: {}", e.what());
-        return std::unexpected(make_error_code(StorageErrc::UnknownError));
-    }
-
-    return contents;
+    // TODO
 }
 
-}  // namespace DistributedCacheFS::Cache
+}  // namespace DistributedCacheFS::Storage

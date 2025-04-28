@@ -70,12 +70,12 @@ int main(int argc, char *argv[])
 
     // Setup Core Components
     std::unique_ptr<DistributedCacheFS::Origin::OriginManager> origin_manager;
-    std::unique_ptr<DistributedCacheFS::Cache::CacheCoordinator> cache_coordinator;
+    std::unique_ptr<DistributedCacheFS::Cache::CacheManager> cache_coordinator;
     try {
         origin_manager =
             std::make_unique<DistributedCacheFS::Origin::OriginManager>(config_result.value().origin
             );
-        cache_coordinator = std::make_unique<DistributedCacheFS::Cache::CacheCoordinator>(
+        cache_coordinator = std::make_unique<DistributedCacheFS::Cache::CacheManager>(
             config_result.value(), origin_manager.get()
         );
     } catch (const std::exception &e) {
@@ -109,8 +109,8 @@ int main(int argc, char *argv[])
     // Setup Filesystem Context
     auto context_ptr               = std::make_unique<DistributedCacheFS::FileSystemContext>();
     context_ptr->config            = std::move(config_result.value());
-    context_ptr->origin_manager    = origin_manager.get();
-    context_ptr->cache_coordinator = cache_coordinator.get();
+    context_ptr->origin_manager    = std::move(origin_manager);
+    context_ptr->cache_coordinator = std::move(cache_coordinator);
 
     // Construct arguments for fuse_main
     std::vector<char *> fuse_argv;
@@ -129,14 +129,14 @@ int main(int argc, char *argv[])
         }
     }
     // Initialize FUSE Operations
-    // Ensure ops struct has static duration or lives longer than fuse_main
+    // Ensure ops struct lives longer than fuse_main
     static fuse_operations fs_ops = DistributedCacheFS::FuseOps::get_fuse_operations();
 
     // Start FUSE Main Loop
     spdlog::info("Starting FUSE main loop...");
     int fuse_ret =
         fuse_main(static_cast<int>(fuse_argv.size()), fuse_argv.data(), &fs_ops, context_ptr.get());
-    spdlog::info("FUSE main loop finished with code: {}", fuse_ret);
+    spdlog::trace("FUSE main loop finished with code: {}", fuse_ret);
 
     spdlog::info("Shutting down components and cleaning up resources...");
 

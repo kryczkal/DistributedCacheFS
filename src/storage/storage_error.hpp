@@ -167,7 +167,7 @@ int StorageResultToErrno(const StorageResult<T>& result)
             }
         } else {
             // If it's a generic error code (e.g., from std::filesystem)
-            return -ec.value();  // Return negative errno value
+            return -ec.value();  // Return negative errno heat
         }
     }
 }

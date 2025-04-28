@@ -58,5 +58,5 @@ target_link_libraries(
         libJson
         libSpdlog
         libCli11
-
+        libBoost
 )

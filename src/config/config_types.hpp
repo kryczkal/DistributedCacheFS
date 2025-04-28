@@ -23,15 +23,15 @@ enum class OriginType : std::uint8_t { Local };
 std::optional<OriginType> StringToOriginType(const std::string &type_str);
 const char *OriginTypeToString(OriginType type);
 
-enum class CacheTierStorageType : std::uint8_t { Local, Shared };
+enum class StorageType : std::uint8_t { Local, Shared };
 
-std::optional<CacheTierStorageType> StringToCacheTierStorageType(const std::string &type_str);
-const char *CacheTierStorageTypeToString(CacheTierStorageType type);
+std::optional<StorageType> StringToCacheTierStorageType(const std::string &type_str);
+const char *CacheTierStorageTypeToString(StorageType type);
 
-enum class SharedCachePolicy : std::uint8_t { Sync, Divide };
+enum class SharedStorage : std::uint8_t { Sync, Divide };
 
-std::optional<SharedCachePolicy> StringToSharedCachePolicy(const std::string &policy_str);
-const char *SharedCachePolicyToString(SharedCachePolicy policy);
+std::optional<SharedStorage> StringToSharedCachePolicy(const std::string &policy_str);
+const char *SharedCachePolicyToString(SharedStorage policy);
 
 // Function to convert string to spdlog::level::level_enum
 std::optional<spdlog::level::level_enum> StringToLogLevel(const std::string &level_str);
@@ -52,36 +52,39 @@ struct GlobalSettings {
     std::uint16_t listen_port           = Constants::DEFAULT_LISTEN_PORT;
 };
 
-struct OriginDefinition {
-    OriginType type = OriginType::Local;
-    std::filesystem::path path;
-    // TODO: Add other origin-specific options
-    bool isValid() const;
-};
+struct StorageDefinition {
+    std::filesystem::path path;  ///< Path for the cache storage
+    StorageType type = StorageType::Local;
 
-struct CacheTierDefinition {
-    std::filesystem::path path;      ///< Path for the cache storage
-    int tier                  = -1;  ///< Cache tier priority (lower is checked first)
-    CacheTierStorageType type = CacheTierStorageType::Local;  // Local node cache or Shared
-
-    std::optional<SharedCachePolicy> policy;  ///< Required if type is Shared
-    std::optional<std::string> share_group;   ///< Required if type is Shared
+    std::optional<SharedStorage> policy;     ///< Required if type is Shared
+    std::optional<std::string> share_group;  ///< Required if type is Shared
 
     // Size limits are relevant for 'divide' policy
     std::optional<double> min_size_gb;
     std::optional<double> max_size_gb;
 
-    bool isValid() const;
+    bool IsValid() const;
+};
+
+struct CacheDefinition {
+    StorageDefinition storage_definition;
+    CacheSettings cache_settings;
+    int tier = -1;  ///< Cache tier priority (lower is checked first)
+
+    bool IsValid() const
+    {
+        return storage_definition.IsValid() && cache_settings.isValid() && (tier >= 0);
+    }
 };
 
 struct NodeConfig {
     std::string node_id;
-    OriginDefinition origin;
+    StorageDefinition origin_definition;
     GlobalSettings global_settings;
     CacheSettings cache_settings;
-    std::vector<CacheTierDefinition> cache_tiers;
+    std::vector<CacheDefinition> cache_definitions;
 
-    bool isValid() const;
+    bool IsValid() const;
 };
 
 //------------------------------------------------------------------------------//
@@ -131,46 +134,46 @@ inline std::optional<spdlog::level::level_enum> StringToLogLevel(const std::stri
     return std::nullopt;
 }
 
-inline std::optional<CacheTierStorageType> StringToCacheTierStorageType(const std::string &type_str)
+inline std::optional<StorageType> StringToCacheTierStorageType(const std::string &type_str)
 {
     if (type_str == "local") {
-        return CacheTierStorageType::Local;
+        return StorageType::Local;
     }
     if (type_str == "shared") {
-        return CacheTierStorageType::Shared;
+        return StorageType::Shared;
     }
     return std::nullopt;
 }
 
-inline const char *CacheTierStorageTypeToString(CacheTierStorageType type)
+inline const char *CacheTierStorageTypeToString(StorageType type)
 {
     switch (type) {
-        case CacheTierStorageType::Local:
+        case StorageType::Local:
             return "Local";
-        case CacheTierStorageType::Shared:
+        case StorageType::Shared:
             return "Shared";
         default:
             return "Unknown";
     }
 }
 
-inline std::optional<SharedCachePolicy> StringToSharedCachePolicy(const std::string &policy_str)
+inline std::optional<SharedStorage> StringToSharedCachePolicy(const std::string &policy_str)
 {
     if (policy_str == "sync") {
-        return SharedCachePolicy::Sync;
+        return SharedStorage::Sync;
     }
     if (policy_str == "divide") {
-        return SharedCachePolicy::Divide;
+        return SharedStorage::Divide;
     }
     return std::nullopt;
 }
 
-inline const char *SharedCachePolicyToString(SharedCachePolicy policy)
+inline const char *SharedCachePolicyToString(SharedStorage policy)
 {
     switch (policy) {
-        case SharedCachePolicy::Sync:
+        case SharedStorage::Sync:
             return "Sync";
-        case SharedCachePolicy::Divide:
+        case SharedStorage::Divide:
             return "Divide";
         default:
             return "Unknown";
@@ -189,23 +192,16 @@ inline bool CacheSettings::isValid() const
     return true;
 }
 
-inline bool OriginDefinition::isValid() const
-{
-    if (path.empty())
-        return false;
-    return true;
-}
-
-inline bool CacheTierDefinition::isValid() const
+inline bool StorageDefinition::IsValid() const
 {
     if (path.empty() || tier < 0) {
         return false;
     }
-    if (type == CacheTierStorageType::Shared) {
+    if (type == StorageType::Shared) {
         if (!policy.has_value() || !share_group.has_value() || share_group.value().empty()) {
             return false;
         }
-        if (policy.value() == SharedCachePolicy::Divide) {
+        if (policy.value() == SharedStorage::Divide) {
             if (min_size_gb.has_value() && max_size_gb.has_value() && *min_size_gb > *max_size_gb) {
                 return false;
             }
@@ -222,13 +218,14 @@ inline bool CacheTierDefinition::isValid() const
     return true;
 }
 
-inline bool NodeConfig::isValid() const
+inline bool NodeConfig::IsValid() const
 {
-    if (node_id.empty() || cache_tiers.empty() || !origin.isValid() || !cache_settings.isValid()) {
+    if (node_id.empty() || cache_definitions.empty() || !origin_definition.IsValid() ||
+        !cache_settings.isValid()) {
         return false;
     }
-    for (const auto &tier_def : cache_tiers) {
-        if (!tier_def.isValid()) {
+    for (const auto &tier_def : cache_definitions) {
+        if (!tier_def.IsValid()) {
             return false;
         }
     }

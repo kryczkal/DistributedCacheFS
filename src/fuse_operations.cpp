@@ -4,7 +4,7 @@
 #include "fuse_operations.hpp"
 // clang-format on
 
-#include "cache/cache_coordinator.hpp"
+#include "cache/cache_manager.hpp"
 #include "config/config_types.hpp"
 #include "storage/storage_error.hpp"
 
@@ -18,7 +18,7 @@ namespace DistributedCacheFS::FuseOps
 {
 
 // Helper to get coordinator
-inline Cache::CacheCoordinator *get_coordinator()
+inline Cache::CacheManager *get_coordinator()
 {
     FileSystemContext *ctx = get_context();
     if (!ctx || !ctx->cache_coordinator) {
@@ -37,7 +37,7 @@ int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/
     spdlog::trace("FUSE getattr called for path: {}", path);
     memset(stbuf, 0, sizeof(struct stat));
 
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator) {
         return -EIO;
     }
@@ -62,7 +62,7 @@ int readdir(
 )
 {
     spdlog::trace("FUSE readdir called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -96,7 +96,7 @@ int readlink(const char *path, char *linkbuf, size_t size)
 int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
 {
     spdlog::trace("FUSE mknod called for path: {}, mode={:o}", path, mode);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -112,7 +112,7 @@ int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
 int mkdir(const char *path, mode_t mode)
 {
     spdlog::trace("FUSE mkdir called for path: {}, mode={:o}", path, mode);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -123,7 +123,7 @@ int mkdir(const char *path, mode_t mode)
 int unlink(const char *path)
 {
     spdlog::trace("FUSE unlink called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -135,7 +135,7 @@ int unlink(const char *path)
 int rmdir(const char *path)
 {
     spdlog::trace("FUSE rmdir called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -154,7 +154,7 @@ int symlink(const char *target, const char *linkpath)
 int rename(const char *from_path, const char *to_path, unsigned int flags)
 {
     spdlog::trace("FUSE rename called for: {} -> {}", from_path, to_path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -193,7 +193,7 @@ int chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info * /*fi*/
 int truncate(const char *path, off_t size, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE truncate called for path: {}, size={}", path, size);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -204,7 +204,7 @@ int truncate(const char *path, off_t size, struct fuse_file_info * /*fi*/)
 int open(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE open called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator) {
         return -EIO;
     }
@@ -282,7 +282,7 @@ int open(const char *path, struct fuse_file_info *fi)
 int read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE read called for path: {}, size={}, offset={}", path, size, offset);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -302,7 +302,7 @@ int write(
 )
 {
     spdlog::trace("FUSE write called for path: {}, size={}, offset={}", path, size, offset);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -320,7 +320,7 @@ int write(
 int statfs(const char *path, struct statvfs *stbuf)
 {
     spdlog::trace("FUSE statfs called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -368,7 +368,7 @@ int opendir(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE opendir called for {}", path);
     // Check if directory exists using GetAttributes
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = get_coordinator();
     if (!coordinator)
         return -EIO;
     auto result   = coordinator->GetAttributes(path);
