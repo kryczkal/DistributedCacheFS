@@ -126,6 +126,7 @@ class CacheManager
 
     /// Attempt to promote an item to a faster tier
     void PromoteItem(const fs::path& fuse_path);
+    void PromoteItem(const ItemMetadata& item_metadata);
 
     //------------------------------------------------------------------------------//
     // Private Fields

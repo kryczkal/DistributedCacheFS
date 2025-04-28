@@ -40,7 +40,7 @@ class IStorage
     [[nodiscard]] virtual StorageResult<std::size_t> GetUsedBytes() const      = 0;
     [[nodiscard]] virtual StorageResult<std::size_t> GetAvailableBytes() const = 0;
 
-    // Core Cache Read/Write Operations
+    // Core Read/Write Operations
 
     virtual StorageResult<std::size_t> Read(
         const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& buffer
@@ -61,6 +61,10 @@ class IStorage
 
     virtual StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const = 0;
+
+    virtual StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
+        const std::filesystem::path& relative_path
+    ) = 0;
 
     // Initialization / Shutdown
     virtual StorageResult<void> Initialize() = 0;

@@ -18,6 +18,23 @@ namespace DistributedCacheFS::Cache
 namespace fs  = std::filesystem;
 namespace bmi = boost::multi_index;
 
+struct HeatMetadata {
+    double heat;
+    double fetch_cost_ms;
+    time_t last_access_time;  ///< Last accessed time
+};
+
+struct CoherencyMetadata {
+    time_t last_modified_time;
+    off_t size_bytes;
+};
+
+struct ItemMetadata {
+    fs::path path;
+    HeatMetadata heat_metadata;
+    CoherencyMetadata coherency_metadata;
+};
+
 class CacheTier : Storage::IStorage
 {
     private:
@@ -29,23 +46,6 @@ class CacheTier : Storage::IStorage
 
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
-
-    struct HeatMetadata {
-        double heat;
-        double fetch_cost;
-        time_t last_access_time;  ///< Last accessed time
-    };
-
-    struct CoherencyMetadata {
-        time_t last_modified_time;
-        off_t size_bytes;
-    };
-
-    struct ItemMetadata {
-        fs::path path;
-        HeatMetadata heat_metadata;
-        CoherencyMetadata coherency_metadata;
-    };
 
     // Cache index tags
     struct by_path {

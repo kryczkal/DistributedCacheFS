@@ -614,7 +614,7 @@ StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::pa
     }
 
     struct stat stbuf{};
-    if (::stat(full_path.c_str(), &stbuf) == -1) {
+    if (::lstat(full_path.c_str(), &stbuf) == -1) {
         int stat_errno = errno;
 
         if (stat_errno == ENOENT) {
@@ -627,14 +627,41 @@ StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::pa
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
     }
-    // Note: This returns attributes of the cached copy.
-    // Caller (CacheCoordinator) needs to compare with origin if needed.
     return stbuf;
 }
 
 LocalStorage::LocalStorage(const Config::StorageDefinition& definition)
 {
     // TODO
+}
+StorageResult<std::vector<std::pair<std::string, struct stat>>> LocalStorage::ListDirectory(
+    const std::filesystem::path& relative_path
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    if (!std::filesystem::is_directory(full_path)) {
+        return std::unexpected(make_error_code(StorageErrc::NotADirectory));
+    }
+
+    std::vector<std::pair<std::string, struct stat>> entries;
+    for (const auto& entry : std::filesystem::directory_iterator(full_path)) {
+        struct stat stbuf{};
+        if (::lstat(entry.path().c_str(), &stbuf) == -1) {
+            int stat_errno = errno;
+            spdlog::warn(
+                "LocalStorage::ListDirectory: lstat failed for '{}': {}", entry.path().string(),
+                std::strerror(stat_errno)
+            );
+            return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
+        }
+        entries.emplace_back(entry.path().filename().string(), stbuf);
+    }
+    return entries;
 }
 
 }  // namespace DistributedCacheFS::Storage

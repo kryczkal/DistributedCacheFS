@@ -56,6 +56,9 @@ class LocalStorage : public IStorage
     ) const override;
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const override;
+    StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
+        const std::filesystem::path& relative_path
+    ) override;
 
     StorageResult<void> Initialize() override;
     StorageResult<void> Shutdown() override;
