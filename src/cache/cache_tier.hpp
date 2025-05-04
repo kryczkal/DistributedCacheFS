@@ -35,7 +35,7 @@ struct ItemMetadata {
     CoherencyMetadata coherency_metadata;
 };
 
-class CacheTier : Storage::IStorage
+class CacheTier : public Storage::IStorage
 {
     private:
     //------------------------------------------------------------------------------//
@@ -70,8 +70,8 @@ class CacheTier : Storage::IStorage
     //------------------------------------------------------------------------------//
     // Class Creation and Destruction
     //------------------------------------------------------------------------------//
-    explicit CacheTier(Config::CacheDefinition cache_definition);
-    ~CacheTier() = default;
+    explicit CacheTier(const Config::CacheDefinition& cache_definition);
+    ~CacheTier() override = default;
 
     //------------------------------------------------------------------------------//
     // Public Methods
@@ -87,8 +87,51 @@ class CacheTier : Storage::IStorage
     StorageResult<std::uint64_t> GetUsedBytes() const override;
     StorageResult<std::uint64_t> GetAvailableBytes() const override;
 
+    StorageResult<void> Initialize() override;
+    StorageResult<void> Shutdown() override;
+
+    //------------------------------------------------------------------------------//
+    // Public Fields
+    //------------------------------------------------------------------------------//
+
+    StorageResult<std::pair<bool, size_t>> ReadItemIfCacheValid(
+        const fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer,
+        const CoherencyMetadata& origin_metadata
+    );
+
+    StorageResult<bool> CacheItemIfWorthIt(
+        const fs::path& fuse_path, off_t offset, std::span<const std::byte>& data,
+        const ItemMetadata& item_metadata
+    );
+
+    StorageResult<void> CacheItemForcibly(
+        const fs::path& fuse_path, off_t offset, std::span<const std::byte>& data,
+        const ItemMetadata& item_metadata
+    );
+
+    StorageResult<bool> IsCacheItemValid(
+        const fs::path& fuse_path, const CoherencyMetadata& origin_metadata
+    ) const;
+
+    StorageResult<bool> IsItemWorthInserting(const ItemMetadata& item_metadata) const;
+
+    StorageResult<void> FreeUpSpace(size_t required_space);
+
+    void ReheatItem(const fs::path& fuse_path);
+
+    StorageResult<void> InvalidateAndRemoveItem(const fs::path& fuse_path);
+
+    StorageResult<const ItemMetadata&> GetItemMetadata(const fs::path& fuse_path);
+
+    private:
+    //------------------------------------------------------------------------------//
+    // Private Methods
+    //------------------------------------------------------------------------------//
+
+    // Wrappers to storage_instance_
+
     StorageResult<std::size_t> Read(
-        const std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& buffer
+        const fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer
     ) override;
     StorageResult<std::size_t> Write(
         const std::filesystem::path& fuse_path, off_t offset, std::span<const std::byte>& data
@@ -99,48 +142,19 @@ class CacheTier : Storage::IStorage
     StorageResult<bool> CheckIfFileExists(const std::filesystem::path& fuse_path) const override;
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& fuse_path) const override;
 
-    StorageResult<void> Initialize() override;
-    StorageResult<void> Shutdown() override;
+    fs::path RelativeToAbsPath(const std::filesystem::path& fuse_path) const override;
 
-    std::filesystem::path RelativeToAbsPath(const std::filesystem::path& fuse_path) const override;
+    //
 
-    //------------------------------------------------------------------------------//
-    // Public Fields
-    //------------------------------------------------------------------------------//
-
-    StorageResult<void> InvalidateAndRemoveEntry(const fs::path& fuse_path);
-
-    StorageResult<bool> CacheIfWorthIt(
-        const std::filesystem::path& fuse_path, off_t offset, std::span<const std::byte>& data,
-        const ItemMetadata& item_metadata
-    );
-
-    StorageResult<void> CacheForcibly(
-        const fs::path& fuse_path, off_t offset, std::span<const std::byte>& data,
-        const ItemMetadata& item_metadata
-    );
-
-    StorageResult<bool> IsCacheValid(
-        const fs::path& fuse_path, const CoherencyMetadata& current_origin_metadata
+    double CalculateItemHeat(
+        const fs::path& fuse_path, const ItemMetadata& item_metadata, time_t current_time
     ) const;
-
-    StorageResult<bool> IsItemWorthInserting(const ItemMetadata& item_metadata) const;
-
-    StorageResult<void> FreeUpSpace(size_t required_space);
-
-    double CalculateHeat(
-        const fs::path& fuse_path, ItemMetadata& item_metadata, time_t current_time
-    ) const;
-
-    private:
-    //------------------------------------------------------------------------------//
-    // Private Methods
-    //------------------------------------------------------------------------------//
 
     //------------------------------------------------------------------------------//
     // Private Fields
     //------------------------------------------------------------------------------//
     const Config::CacheDefinition cache_definition_;       ///< Cache definition
+    const std::shared_ptr<Storage::IStorage> origin_;      ///< Origin storage instance
     std::unique_ptr<Storage::IStorage> storage_instance_;  ///< Storage instance
     ItemMetadataContainer item_metadatas_;
     mutable std::recursive_mutex cache_mutex_;  ///< Mutex for cache operations
@@ -148,6 +162,8 @@ class CacheTier : Storage::IStorage
     //------------------------------------------------------------------------------//
     // Helpers
     //------------------------------------------------------------------------------//
+
+    inline bool InvalidFusePath(const fs::path& p) { return p.empty() || p == "/"; }
 };
 
 }  // namespace DistributedCacheFS::Cache

@@ -107,10 +107,10 @@ int main(int argc, char *argv[])
     spdlog::info("Using Node ID: {}", config_result.value().node_id);
 
     // Setup Filesystem Context
-    auto context_ptr               = std::make_unique<DistributedCacheFS::FileSystemContext>();
-    context_ptr->config            = std::move(config_result.value());
-    context_ptr->origin_manager    = std::move(origin_manager);
-    context_ptr->cache_coordinator = std::move(cache_coordinator);
+    auto context_ptr            = std::make_unique<DistributedCacheFS::FileSystemContext>();
+    context_ptr->config         = std::move(config_result.value());
+    context_ptr->origin_manager = std::move(origin_manager);
+    context_ptr->cache_manager  = std::move(cache_coordinator);
 
     // Construct arguments for fuse_main
     std::vector<char *> fuse_argv;

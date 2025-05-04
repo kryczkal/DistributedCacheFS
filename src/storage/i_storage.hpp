@@ -66,6 +66,19 @@ class IStorage
         const std::filesystem::path& relative_path
     ) = 0;
 
+    virtual StorageResult<void> CreateFile(
+        const std::filesystem::path& relative_path, mode_t mode
+    ) = 0;
+
+    virtual StorageResult<void> CreateDirectory(
+        const std::filesystem::path& relative_path, mode_t mode
+    ) = 0;
+
+    virtual StorageResult<void> Move(
+        const std::filesystem::path& from_relative_path,
+        const std::filesystem::path& to_relative_path
+    ) = 0;
+
     // Initialization / Shutdown
     virtual StorageResult<void> Initialize() = 0;
     virtual StorageResult<void> Shutdown()   = 0;

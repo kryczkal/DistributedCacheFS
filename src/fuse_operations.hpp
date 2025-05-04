@@ -8,15 +8,13 @@
 
 #include "cache/cache_manager.hpp"
 #include "config/config_types.hpp"
-#include "origin/origin_manager.hpp"
 
 namespace DistributedCacheFS
 {
 
 struct FileSystemContext {
     Config::NodeConfig config;
-    std::unique_ptr<Origin::OriginManager> origin_manager  = nullptr;
-    std::unique_ptr<Cache::CacheManager> cache_coordinator = nullptr;
+    std::unique_ptr<Cache::CacheManager> cache_manager = nullptr;
 };
 
 namespace FuseOps

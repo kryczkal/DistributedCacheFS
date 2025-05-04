@@ -206,21 +206,23 @@ StorageResult<void> LocalStorage::RemoveXattr(
 std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::path& relative_path
 ) const
 {
-    auto combined        = (base_path_ / relative_path).lexically_normal();
-    std::string base_str = base_path_.string();
-    if (base_str.back() != std::filesystem::path::preferred_separator) {
-        base_str += std::filesystem::path::preferred_separator;
-    }
-    if (combined.string().rfind(base_str, 0) != 0 && combined != base_path_) {
-        spdlog::warn(
-            "LocalStorage: Potential path traversal: relative='{}', combined='{}', base='{}'",
-            relative_path.string(), combined.string(), base_path_.string()
-        );
+    std::error_code ec;
+    auto full = weakly_canonical(base_path_ / relative_path, ec);
+    if (ec)
+        return {};
+
+    // Ensure the resolved path is inside base_path_
+    auto base_can = weakly_canonical(base_path_, ec);
+    if (ec)
+        return {};
+
+    auto mismatch = std::mismatch(base_can.begin(), base_can.end(), full.begin(), full.end());
+    if (mismatch.first != base_can.end()) {
+        spdlog::warn("LocalStorage: path traversal detected: {}", relative_path.string());
         return {};
     }
-    return combined;
+    return full;
 }
-
 std::filesystem::path LocalStorage::GetValidatedFullPath(const std::filesystem::path& relative_path
 ) const
 {

@@ -46,6 +46,4 @@ class StorageFactory
 
 }  // namespace DistributedCacheFS::Storage
 
-}  // namespace DistributedCacheFS
-
 #endif  // DISTRIBUTEDCACHEFS_SRC_STORAGE_STORAGE_FACTORY_HPP_

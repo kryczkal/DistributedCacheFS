@@ -39,7 +39,7 @@ class CacheManager
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
 
-    using TierToCacheMap = std::map<int, std::vector<std::shared_ptr<CacheTier>>>;
+    using TierToCacheMap = std::map<size_t, std::vector<std::shared_ptr<CacheTier>>>;
     using FileToCacheMap = std::unordered_map<fs::path, std::shared_ptr<CacheTier>>;
 
     public:
@@ -64,42 +64,42 @@ class CacheManager
 
     // Core FUSE Operation Handlers
 
-    StorageResult<struct stat> GetAttributes(const std::filesystem::path& fuse_path);
+    StorageResult<struct stat> GetAttributes(std::filesystem::path& fuse_path);
 
     StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
         const std::filesystem::path& fuse_path
     );
 
     StorageResult<size_t> ReadFile(
-        const std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& buffer
+        std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& buffer
     );
 
     StorageResult<size_t> WriteFile(
-        const std::filesystem::path& fuse_path, off_t offset,
+        std::filesystem::path& fuse_path, off_t offset,
         std::span<const std::byte>& data
     );  // Implements write policy
 
     StorageResult<void> CreateFile(
-        const std::filesystem::path& fuse_path, mode_t mode
+        std::filesystem::path& fuse_path, mode_t mode
     );  // Implements write policy
 
     StorageResult<void> CreateDirectory(
-        const std::filesystem::path& fuse_path, mode_t mode
+        std::filesystem::path& fuse_path, mode_t mode
     );  // Implements write policy
 
-    StorageResult<void> Remove(const std::filesystem::path& fuse_path
+    StorageResult<void> Remove(std::filesystem::path& fuse_path
     );  // Implements write policy + cache invalidation
 
     StorageResult<void> TruncateFile(
-        const std::filesystem::path& fuse_path, off_t size
+        std::filesystem::path& fuse_path, off_t size
     );  // Implements write policy + cache invalidation/update
 
     StorageResult<void> Move(
-        const std::filesystem::path& from_fuse_path,
-        const std::filesystem::path& to_fuse_path
+        std::filesystem::path& from_fuse_path,
+        std::filesystem::path& to_fuse_path
     );  // Implements write policy + cache invalidation
 
-    StorageResult<struct statvfs> GetFilesystemStats(const std::filesystem::path& fuse_path);
+    StorageResult<struct statvfs> GetFilesystemStats(fs::path& fuse_path);
 
     //------------------------------------------------------------------------------//
     // Public Fields
@@ -111,22 +111,27 @@ class CacheManager
     //------------------------------------------------------------------------------//
 
     /// Fetch from origin and store in an appropriate cache tier
-    StorageResult<size_t> FetchAndCache(
-        const fs::path& relative_path, off_t offset,
+    StorageResult<size_t> FetchAndTryCache(
+        fs::path& fuse_path, off_t offset,
         std::span<std::byte>& buffer  ///< Buffer to potentially fill directly
     );
 
     /// Selects a cache tier for writing new data (based on tier prio, space)
-    StorageResult<IStorage*> SelectCacheTierForWrite(
-        const fs::path& relative_path, size_t required_space
+    StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
+        const ItemMetadata& item_metadata
+    );
+
+    StorageResult<void> RemoveMetadataInvalidateCache(
+        const fs::path& fuse_path, const std::shared_ptr<CacheTier>& cache_tier
     );
 
     /// Helper to sanitize fuse path
-    fs::path SanitizeFusePath(const fs::path& fuse_path) const;
+    void SanitizeFusePath(fs::path& fuse_path) const;
 
     /// Attempt to promote an item to a faster tier
-    void PromoteItem(const fs::path& fuse_path);
-    void PromoteItem(const ItemMetadata& item_metadata);
+    StorageResult<void> TryPromoteItem(fs::path& fuse_path);
+
+    StorageResult<CoherencyMetadata> GetOriginCoherencyMetadata(const fs::path& fuse_path) const;
 
     //------------------------------------------------------------------------------//
     // Private Fields

@@ -25,13 +25,13 @@ const char *OriginTypeToString(OriginType type);
 
 enum class StorageType : std::uint8_t { Local, Shared };
 
-std::optional<StorageType> StringToCacheTierStorageType(const std::string &type_str);
-const char *CacheTierStorageTypeToString(StorageType type);
+std::optional<StorageType> StringToStorageType(const std::string &type_str);
+const char *StorageTypeToString(StorageType type);
 
 enum class SharedStorage : std::uint8_t { Sync, Divide };
 
-std::optional<SharedStorage> StringToSharedCachePolicy(const std::string &policy_str);
-const char *SharedCachePolicyToString(SharedStorage policy);
+std::optional<SharedStorage> StringToSharedStoragePolicy(const std::string &policy_str);
+const char *SharedStoragePolicyToString(SharedStorage policy);
 
 // Function to convert string to spdlog::level::level_enum
 std::optional<spdlog::level::level_enum> StringToLogLevel(const std::string &level_str);
@@ -91,23 +91,6 @@ struct NodeConfig {
 // Implementation of Enum / Logging Conversion Functions
 //------------------------------------------------------------------------------//
 
-inline std::optional<OriginType> StringToOriginType(const std::string &type_str)
-{
-    if (type_str == "local")
-        return OriginType::Local;
-    return std::nullopt;
-}
-
-inline const char *OriginTypeToString(OriginType type)
-{
-    switch (type) {
-        case OriginType::Local:
-            return "Local";
-        default:
-            return "Unknown";
-    }
-}
-
 inline std::optional<spdlog::level::level_enum> StringToLogLevel(const std::string &level_str)
 {
     if (level_str == "trace") {
@@ -134,7 +117,7 @@ inline std::optional<spdlog::level::level_enum> StringToLogLevel(const std::stri
     return std::nullopt;
 }
 
-inline std::optional<StorageType> StringToCacheTierStorageType(const std::string &type_str)
+inline std::optional<StorageType> StringToStorageType(const std::string &type_str)
 {
     if (type_str == "local") {
         return StorageType::Local;
@@ -145,7 +128,7 @@ inline std::optional<StorageType> StringToCacheTierStorageType(const std::string
     return std::nullopt;
 }
 
-inline const char *CacheTierStorageTypeToString(StorageType type)
+inline const char *StorageTypeToString(StorageType type)
 {
     switch (type) {
         case StorageType::Local:
@@ -157,7 +140,7 @@ inline const char *CacheTierStorageTypeToString(StorageType type)
     }
 }
 
-inline std::optional<SharedStorage> StringToSharedCachePolicy(const std::string &policy_str)
+inline std::optional<SharedStorage> StringToSharedStoragePolicy(const std::string &policy_str)
 {
     if (policy_str == "sync") {
         return SharedStorage::Sync;
@@ -168,7 +151,7 @@ inline std::optional<SharedStorage> StringToSharedCachePolicy(const std::string 
     return std::nullopt;
 }
 
-inline const char *SharedCachePolicyToString(SharedStorage policy)
+inline const char *SharedStoragePolicyToString(SharedStorage policy)
 {
     switch (policy) {
         case SharedStorage::Sync:
@@ -194,7 +177,7 @@ inline bool CacheSettings::isValid() const
 
 inline bool StorageDefinition::IsValid() const
 {
-    if (path.empty() || tier < 0) {
+    if (path.empty()) {
         return false;
     }
     if (type == StorageType::Shared) {
