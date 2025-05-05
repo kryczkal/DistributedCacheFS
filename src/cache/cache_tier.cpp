@@ -405,7 +405,7 @@ double CacheTier::CalculateInitialItemHeat(
     const fs::path &fuse_path, const ItemMetadata &item_metadata
 )
 {
-    spdlog::debug("CacheTier::CalculateInitialHeat({}, {})", fuse_path.string());
+    spdlog::debug("CacheTier::CalculateInitialHeat({}, {})", fuse_path.string(), item_metadata.path.string());
     if (item_metadata.coherency_metadata.size_bytes < 0) {
         return 0.0;
     }
