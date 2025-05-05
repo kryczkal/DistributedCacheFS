@@ -119,7 +119,7 @@ StorageResult<void> CacheManager::ShutdownAll()
 StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fuse_path)
 {
     spdlog::debug("CacheManager::GetAttributes({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -152,7 +152,7 @@ StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheManager::Li
 )
 {
     spdlog::debug("CacheManager::ListDirectory({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -165,7 +165,7 @@ StorageResult<size_t> CacheManager::ReadFile(
 )
 {
     spdlog::debug("CacheManager::ReadFile({}, {}, {})", fuse_path.string(), offset, buffer.size());
-    if (fuse_path.empty())
+    if (fuse_path.empty() || fuse_path == "/")
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
 
     // fast path : cached hit
@@ -386,7 +386,8 @@ StorageResult<void> CacheManager::Move(
 )
 {
     spdlog::debug("CacheManager::Move({}, {})", from_fuse_path.string(), to_fuse_path.string());
-    if (from_fuse_path.empty() || to_fuse_path.empty()) {
+    if (from_fuse_path.empty() || to_fuse_path.empty() || from_fuse_path == "/" ||
+        to_fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -434,7 +435,7 @@ StorageResult<void> CacheManager::Move(
 StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_path)
 {
     spdlog::debug("CacheManager::GetFilesystemStats({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
