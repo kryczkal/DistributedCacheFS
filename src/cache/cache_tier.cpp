@@ -417,7 +417,7 @@ double CacheTier::CalculateInitialItemHeat(
         (size_bytes >= 0) ? (fetch_cost / (static_cast<double>(size_bytes) + 1.0)) : 0.0;
     double heat = base_value;
     spdlog::trace(
-        "CacheTier::CalculateInitialHeat: Heat for {}: {} (base_value: {}, decay_factor: {})",
+        "CacheTier::CalculateInitialHeat: Heat for {}: {} (base_value: {})",
         fuse_path.string(), heat, base_value
     );
     return heat;
