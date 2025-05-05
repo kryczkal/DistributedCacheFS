@@ -100,12 +100,12 @@ class CacheTier : public Storage::IStorage
     );
 
     StorageResult<bool> CacheItemIfWorthIt(
-        const fs::path& fuse_path, off_t offset, std::span<const std::byte>& data,
+        const fs::path& fuse_path, off_t offset, std::span<std::byte>& data,
         const ItemMetadata& item_metadata
     );
 
     StorageResult<void> CacheItemForcibly(
-        const fs::path& fuse_path, off_t offset, std::span<const std::byte>& data,
+        const fs::path& fuse_path, off_t offset, std::span<std::byte>& data,
         const ItemMetadata& item_metadata
     );
 
@@ -119,9 +119,15 @@ class CacheTier : public Storage::IStorage
 
     void ReheatItem(const fs::path& fuse_path);
 
+    /// Re‑calculates the heat of an item based on current time (no access bump)
+    void UpdateItemHeat(const fs::path& fuse_path);
+
+    /// Opportunistic refresh of a random subset of items; call periodically
+    void MaybeRefreshRandomHeats();
+
     StorageResult<void> InvalidateAndRemoveItem(const fs::path& fuse_path);
 
-    StorageResult<const ItemMetadata&> GetItemMetadata(const fs::path& fuse_path);
+    StorageResult<const ItemMetadata> GetItemMetadata(const fs::path& fuse_path);
 
     private:
     //------------------------------------------------------------------------------//
@@ -134,10 +140,23 @@ class CacheTier : public Storage::IStorage
         const fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer
     ) override;
     StorageResult<std::size_t> Write(
-        const std::filesystem::path& fuse_path, off_t offset, std::span<const std::byte>& data
+        const std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& data
     ) override;
     StorageResult<void> Remove(const std::filesystem::path& fuse_path) override;
     StorageResult<void> Truncate(const std::filesystem::path& fuse_path, off_t size) override;
+
+    StorageResult<void> CreateFile(const std::filesystem::path& fuse_path, mode_t mode) override;
+
+    StorageResult<void> CreateDirectory(const std::filesystem::path& fuse_path, mode_t mode)
+        override;
+
+    StorageResult<void> Move(
+        const std::filesystem::path& from_fuse_path, const std::filesystem::path& to_fuse_path
+    ) override;
+
+    StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
+        const std::filesystem::path& fuse_path
+    ) override;
 
     StorageResult<bool> CheckIfFileExists(const std::filesystem::path& fuse_path) const override;
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& fuse_path) const override;
@@ -164,6 +183,8 @@ class CacheTier : public Storage::IStorage
     //------------------------------------------------------------------------------//
 
     inline bool InvalidFusePath(const fs::path& p) { return p.empty() || p == "/"; }
+
+    friend class CacheManager;  ///< Allow CacheManager to access private members
 };
 
 }  // namespace DistributedCacheFS::Cache

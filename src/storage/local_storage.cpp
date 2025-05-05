@@ -19,6 +19,8 @@
 namespace DistributedCacheFS::Storage
 {
 
+namespace fs = std::filesystem;
+
 const char* LocalStorage::XATTR_ORIGIN_MTIME_KEY = "user.dcachefs.origin_mtime_sec";
 const char* LocalStorage::XATTR_ORIGIN_SIZE_KEY  = "user.dcachefs.size";
 
@@ -207,18 +209,19 @@ std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::pat
 ) const
 {
     std::error_code ec;
-    auto full = weakly_canonical(base_path_ / relative_path, ec);
+    auto full = fs::weakly_canonical(base_path_ / relative_path, ec);
     if (ec)
         return {};
 
-    // Ensure the resolved path is inside base_path_
-    auto base_can = weakly_canonical(base_path_, ec);
+    auto base_can = fs::weakly_canonical(base_path_, ec);
     if (ec)
         return {};
 
-    auto mismatch = std::mismatch(base_can.begin(), base_can.end(), full.begin(), full.end());
-    if (mismatch.first != base_can.end()) {
-        spdlog::warn("LocalStorage: path traversal detected: {}", relative_path.string());
+    const std::string full_str = full.string();
+    const std::string base_str = base_can.string();
+
+    if (full_str.rfind(base_str, 0) != 0) {
+        spdlog::warn("LocalStorage: path traversal attempt: {}", relative_path.string());
         return {};
     }
     return full;
@@ -333,16 +336,16 @@ StorageResult<void> LocalStorage::Shutdown()
 StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    struct statvfs vfs_buf;
-    if (::statvfs(base_path_.c_str(), &vfs_buf) == -1) {
-        int stat_errno = errno;
+    std::error_code ec;
+    fs::space_info space = fs::space(base_path_, ec);
+    if (ec) {
         spdlog::error(
-            "LocalStorage::GetCapacityBytes: statvfs failed for '{}': {}", base_path_.string(),
-            std::strerror(stat_errno)
+            "LocalStorage::GetCapacityBytes: fs::space failed for '{}': {}", base_path_.string(),
+            ec.message()
         );
-        return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
+        return std::unexpected(MapFilesystemError(ec, "get_capacity"));
     }
-    return static_cast<std::uint64_t>(vfs_buf.f_frsize) * vfs_buf.f_blocks;
+    return space.capacity;
 }
 
 StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
@@ -367,17 +370,16 @@ StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
 StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    struct statvfs vfs_buf;
-    if (::statvfs(base_path_.c_str(), &vfs_buf) == -1) {
-        int stat_errno = errno;
+    std::error_code ec;
+    fs::space_info space = fs::space(base_path_, ec);
+    if (ec) {
         spdlog::error(
-            "LocalStorage::GetAvailableBytes: statvfs failed for '{}': {}", base_path_.string(),
-            std::strerror(stat_errno)
+            "LocalStorage::GetFreeBytes: fs::space failed for '{}': {}", base_path_.string(),
+            ec.message()
         );
-        return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
+        return std::unexpected(MapFilesystemError(ec, "get_free"));
     }
-
-    return static_cast<std::uint64_t>(vfs_buf.f_frsize) * vfs_buf.f_bavail;
+    return space.free;
 }
 
 StorageResult<std::size_t> LocalStorage::Read(
@@ -422,7 +424,7 @@ StorageResult<std::size_t> LocalStorage::Read(
 }
 
 StorageResult<std::size_t> LocalStorage::Write(
-    const std::filesystem::path& relative_path, off_t offset, std::span<const std::byte>& data
+    const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& data
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
@@ -605,6 +607,115 @@ StorageResult<bool> LocalStorage::CheckIfFileExists(const std::filesystem::path&
     }
     return exists;
 }
+StorageResult<void> LocalStorage::CreateFile(
+    const std::filesystem::path& relative_path, mode_t mode
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+    auto parent = full_path.parent_path();
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) {
+        return std::unexpected(MapFilesystemError(ec, "create_file_parent"));
+    }
+    std::ofstream ofs(full_path, std::ios::binary | std::ios::trunc);
+    if (!ofs) {
+        return std::unexpected(make_error_code(StorageErrc::IOError));
+    }
+    ofs.close();
+    std::filesystem::perms perms = static_cast<std::filesystem::perms>(0);
+    if (mode & S_IRUSR)
+        perms |= std::filesystem::perms::owner_read;
+    if (mode & S_IWUSR)
+        perms |= std::filesystem::perms::owner_write;
+    if (mode & S_IRGRP)
+        perms |= std::filesystem::perms::group_read;
+    if (mode & S_IWGRP)
+        perms |= std::filesystem::perms::group_write;
+    if (mode & S_IROTH)
+        perms |= std::filesystem::perms::others_read;
+    if (mode & S_IWOTH)
+        perms |= std::filesystem::perms::others_write;
+    std::filesystem::permissions(full_path, perms, ec);
+    if (ec) {
+        return std::unexpected(MapFilesystemError(ec, "create_file_perm"));
+    }
+    return {};
+}
+StorageResult<void> LocalStorage::CreateDirectory(
+    const std::filesystem::path& relative_path, mode_t mode
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+    std::error_code ec;
+    // Create directory and all parents
+    if (!fs::create_directories(full_path, ec) && ec) {
+        spdlog::error(
+            "LocalStorage::CreateDirectory: Failed to create directory '{}': {}",
+            full_path.string(), ec.message()
+        );
+        return std::unexpected(MapFilesystemError(ec, "create_directory"));
+    }
+    // Set permissions from mode
+    std::filesystem::perms perms = static_cast<std::filesystem::perms>(0);
+    if (mode & S_IRUSR)
+        perms |= std::filesystem::perms::owner_read;
+    if (mode & S_IWUSR)
+        perms |= std::filesystem::perms::owner_write;
+    if (mode & S_IRGRP)
+        perms |= std::filesystem::perms::group_read;
+    if (mode & S_IWGRP)
+        perms |= std::filesystem::perms::group_write;
+    if (mode & S_IROTH)
+        perms |= std::filesystem::perms::others_read;
+    if (mode & S_IWOTH)
+        perms |= std::filesystem::perms::others_write;
+    std::filesystem::permissions(full_path, perms, ec);
+    if (ec) {
+        spdlog::error(
+            "LocalStorage::CreateDirectory: Failed to set permissions on '{}': {}",
+            full_path.string(), ec.message()
+        );
+        return std::unexpected(MapFilesystemError(ec, "create_directory_perm"));
+    }
+    return {};
+}
+StorageResult<void> LocalStorage::Move(
+    const std::filesystem::path& from_relative_path, const std::filesystem::path& to_relative_path
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto from_full = GetValidatedFullPath(from_relative_path);
+    if (from_full.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    auto to_full = GetValidatedFullPath(to_relative_path);
+    if (to_full.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    std::error_code ec;
+    auto parent = to_full.parent_path();
+    if (!parent.empty() && !fs::exists(parent, ec)) {
+        fs::create_directories(parent, ec);
+        if (ec)
+            return std::unexpected(MapFilesystemError(ec, "move_create_parent"));
+    } else if (ec) {
+        return std::unexpected(MapFilesystemError(ec, "move_check_parent"));
+    }
+
+    std::filesystem::rename(from_full, to_full, ec);
+    if (ec)
+        return std::unexpected(MapFilesystemError(ec, "move"));
+
+    return {};
+}
 
 StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::path& relative_path
 ) const
@@ -633,8 +744,8 @@ StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::pa
 }
 
 LocalStorage::LocalStorage(const Config::StorageDefinition& definition)
+    : definition_(definition), base_path_(definition.path)
 {
-    // TODO
 }
 StorageResult<std::vector<std::pair<std::string, struct stat>>> LocalStorage::ListDirectory(
     const std::filesystem::path& relative_path

@@ -47,7 +47,7 @@ class LocalStorage : public IStorage
         const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& buffer
     ) override;
     StorageResult<std::size_t> Write(
-        const std::filesystem::path& relative_path, off_t offset, std::span<const std::byte>& data
+        const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& data
     ) override;
     StorageResult<void> Remove(const std::filesystem::path& relative_path) override;
     StorageResult<void> Truncate(const std::filesystem::path& relative_path, off_t size) override;
@@ -58,6 +58,17 @@ class LocalStorage : public IStorage
     ) const override;
     StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
         const std::filesystem::path& relative_path
+    ) override;
+
+    StorageResult<void> CreateFile(const std::filesystem::path& relative_path, mode_t mode)
+        override;
+
+    StorageResult<void> CreateDirectory(const std::filesystem::path& relative_path, mode_t mode)
+        override;
+
+    StorageResult<void> Move(
+        const std::filesystem::path& from_relative_path,
+        const std::filesystem::path& to_relative_path
     ) override;
 
     StorageResult<void> Initialize() override;

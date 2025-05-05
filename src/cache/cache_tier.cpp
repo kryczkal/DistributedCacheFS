@@ -9,6 +9,7 @@
 #include "boost/multi_index_container.hpp"
 
 #include <filesystem>
+#include <random>
 
 namespace DistributedCacheFS::Cache
 {
@@ -83,7 +84,7 @@ StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
             );
             return std::unexpected(res.error());
         }
-        auto bytes_read = res.value();
+        bytes_read = res.value();
         if (bytes_read == 0) {
             spdlog::error(
                 "CacheTier::ReadIfCacheValid: Read zero bytes from cache item: {}",
@@ -109,7 +110,7 @@ StorageResult<std::size_t> CacheTier::Read(
     return storage_instance_->Read(fuse_path, offset, buffer);
 }
 StorageResult<std::size_t> CacheTier::Write(
-    const std::filesystem::path &fuse_path, off_t offset, std::span<const std::byte> &data
+    const std::filesystem::path &fuse_path, off_t offset, std::span<std::byte> &data
 )
 {
     std::lock_guard lock(cache_mutex_);
@@ -124,6 +125,30 @@ StorageResult<void> CacheTier::Truncate(const std::filesystem::path &fuse_path, 
 {
     std::lock_guard lock(cache_mutex_);
     return storage_instance_->Truncate(fuse_path, size);
+}
+StorageResult<void> CacheTier::CreateFile(const std::filesystem::path &fuse_path, mode_t mode)
+{
+    std::lock_guard lock(cache_mutex_);
+    return storage_instance_->CreateFile(fuse_path, mode);
+}
+StorageResult<void> CacheTier::CreateDirectory(const std::filesystem::path &fuse_path, mode_t mode)
+{
+    std::lock_guard lock(cache_mutex_);
+    return storage_instance_->CreateDirectory(fuse_path, mode);
+}
+StorageResult<void> CacheTier::Move(
+    const std::filesystem::path &from_fuse_path, const std::filesystem::path &to_fuse_path
+)
+{
+    std::lock_guard lock(cache_mutex_);
+    return storage_instance_->Move(from_fuse_path, to_fuse_path);
+}
+StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheTier::ListDirectory(
+    const std::filesystem::path &fuse_path
+)
+{
+    std::lock_guard lock(cache_mutex_);
+    return storage_instance_->ListDirectory(fuse_path);
 }
 StorageResult<bool> CacheTier::CheckIfFileExists(const std::filesystem::path &fuse_path) const
 {
@@ -165,7 +190,7 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path &fuse_path
     item_metadatas_.erase(fuse_path);
     return {};
 }
-StorageResult<const ItemMetadata &> CacheTier::GetItemMetadata(const fs::path &fuse_path)
+StorageResult<const ItemMetadata> CacheTier::GetItemMetadata(const fs::path &fuse_path)
 {
     std::lock_guard lock(cache_mutex_);
     spdlog::debug("CacheTier::GetItemMetadata({})", fuse_path.string());
@@ -179,7 +204,7 @@ StorageResult<const ItemMetadata &> CacheTier::GetItemMetadata(const fs::path &f
     return *it;
 }
 StorageResult<bool> CacheTier::CacheItemIfWorthIt(
-    const std::filesystem::path &fuse_path, off_t offset, std::span<const std::byte> &data,
+    const std::filesystem::path &fuse_path, off_t offset, std::span<std::byte> &data,
     const ItemMetadata &item_metadata
 )
 {
@@ -214,7 +239,7 @@ StorageResult<bool> CacheTier::CacheItemIfWorthIt(
     return true;
 }
 StorageResult<void> CacheTier::CacheItemForcibly(
-    const fs::path &fuse_path, off_t offset, std::span<const std::byte> &data,
+    const fs::path &fuse_path, off_t offset, std::span<std::byte> &data,
     const ItemMetadata &item_metadata
 )
 {
@@ -299,7 +324,7 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) co
     // or the cumulative heat of evicted items exceeds the candidate’s heat.
     size_t would_free   = 0;
     double heat_tally   = 0.0;
-    const auto &by_heat = item_metadatas_.get<by_heat>();
+    const auto &by_heat = item_metadatas_.get<CacheTier::by_heat>();
     for (auto it = by_heat.begin();
          it != by_heat.end() && would_free < item.coherency_metadata.size_bytes; ++it) {
         would_free += it->coherency_metadata.size_bytes;
@@ -310,39 +335,42 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) co
     }
     return true;
 }
-StorageResult<void> CacheTier::FreeUpSpace(const size_t required_space)
+StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
 {
-    std::lock_guard lock(cache_mutex_);
     spdlog::debug("CacheTier::FreeUpSpace({})", required_space);
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
 
     auto avail_res = storage_instance_->GetAvailableBytes();
-    if (!avail_res) {
+    if (!avail_res)
         return std::unexpected(avail_res.error());
-    }
-
-    size_t freed = avail_res.value();
-    if (freed >= required_space) {
+    if (*avail_res >= required_space)
         return {};
+
+    auto &by_heat = item_metadatas_.get<CacheTier::by_heat>();
+
+    size_t reclaimed = 0;
+    for (auto it = by_heat.begin(); it != by_heat.end() && reclaimed < required_space;) {
+        const fs::path victim = it->path;  // iterator may be invalidated
+        const size_t vsize    = it->coherency_metadata.size_bytes;
+
+        // erase metadata first (iterator safe with modifier)
+        it = by_heat.erase(it);
+
+        // remove backing file (still under lock → no one else touches it)
+        auto rm_res = storage_instance_->Remove(victim);
+        if (!rm_res)
+            return std::unexpected(rm_res.error());
+
+        reclaimed += vsize;
     }
 
-    const auto &by_heat = item_metadatas_.get<by_heat>();
-    for (auto it = by_heat.begin(); it != by_heat.end() && freed < required_space;) {
-        auto victim_path         = it->path;
-        const size_t victim_size = it->coherency_metadata.size_bytes;
-        // advance iterator before erasing to avoid invalidation
-        it           = std::next(it);
-        auto inv_res = InvalidateAndRemoveItem(victim_path);
-        if (!inv_res) {
-            return std::unexpected(inv_res.error());
-        }
-        freed += victim_size;
-    }
-
-    if (freed < required_space) {
+    auto new_avail_res = storage_instance_->GetAvailableBytes();
+    if (!new_avail_res || *new_avail_res < required_space)
         return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
-    }
+
     return {};
 }
+
 double CacheTier::CalculateItemHeat(
     const fs::path &fuse_path, const ItemMetadata &item_metadata, time_t current_time
 ) const
@@ -372,17 +400,53 @@ double CacheTier::CalculateItemHeat(
 }
 void CacheTier::ReheatItem(const fs::path &fuse_path)
 {
-    std::lock_guard lock(cache_mutex_);
-    spdlog::debug("CacheTier::TouchItem({})", fuse_path.string());
-    auto it = item_metadatas_.find(fuse_path);
-    if (it == item_metadatas_.end()) {
-        return;
-    }
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
 
-    const auto now = std::time(nullptr);
+    auto it = item_metadatas_.find(fuse_path);
+    if (it == item_metadatas_.end())
+        return;
+
+    const time_t now = std::time(nullptr);
     item_metadatas_.modify(it, [&](ItemMetadata &m) {
         m.heat_metadata.last_access_time = now;
         m.heat_metadata.heat             = CalculateItemHeat(fuse_path, m, now);
     });
+
+    static std::atomic<std::uint64_t> global_hits{0};
+    if ((++global_hits % Constants::HEAT_REFRESH_PERIOD) == 0) {
+        MaybeRefreshRandomHeats();
+    }
+}
+void CacheTier::UpdateItemHeat(const fs::path &fuse_path)
+{
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+    auto it = item_metadatas_.find(fuse_path);
+    if (it == item_metadatas_.end())
+        return;
+    const time_t now = std::time(nullptr);
+    item_metadatas_.modify(it, [&](ItemMetadata &m) {
+        m.heat_metadata.heat = CalculateItemHeat(fuse_path, m, now);
+    });
+}
+void CacheTier::MaybeRefreshRandomHeats()
+{
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+    if (item_metadatas_.empty())
+        return;
+
+    thread_local std::mt19937 rng{std::random_device{}()};
+    std::uniform_real_distribution<double> dice(0.0, 1.0);
+
+    auto it = item_metadatas_.begin();
+    while (it != item_metadatas_.end()) {
+        if (dice(rng) < Constants::HEAT_REFRESH_PROBABILITY) {
+            const fs::path p = it->path;
+            // iterator might be invalidated by modify; copy path first
+            ++it;  // advance before modify
+            UpdateItemHeat(p);
+        } else {
+            ++it;
+        }
+    }
 }
 }  // namespace DistributedCacheFS::Cache

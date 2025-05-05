@@ -40,6 +40,8 @@ class StorageFactory
             case Config::StorageType::Shared:
                 return std::unexpected(make_error_code(StorageErrc::NotSupported)
                 );  // Not implemented yet
+            default:
+                return std::unexpected(make_error_code(StorageErrc::NotSupported));
         }
     }
 };

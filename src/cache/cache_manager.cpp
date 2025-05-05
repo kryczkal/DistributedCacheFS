@@ -23,6 +23,15 @@ namespace DistributedCacheFS::Cache
 using namespace Storage;
 using namespace Config;
 
+CacheManager::CacheManager(Config::NodeConfig& config, std::shared_ptr<IStorage> origin)
+    : config_(config), origin_(std::move(origin))
+{
+    spdlog::debug("CacheManager::CacheManager()");
+    spdlog::info("Creating CacheManager...");
+    if (!origin_) {
+        throw std::runtime_error("Origin storage instance is null");
+    }
+}
 CacheManager::~CacheManager()
 {
     spdlog::debug("CacheManager::~CacheManager()");
@@ -40,39 +49,22 @@ StorageResult<void> CacheManager::InitializeAll()
     spdlog::debug("CacheManager::InitializeAll()");
     spdlog::info("Initializing CacheManager...");
 
+    if (auto res = origin_->Initialize(); !res)
+        return std::unexpected(res.error());
+
     {
-        if (auto res = origin_->Initialize(); !res) {
-            spdlog::error("Failed to initialize origin: {}", res.error().message());
-            return std::unexpected(res.error());
-        }
-    }
+        std::unique_lock lock_tiers(tier_mutex_);
+        tier_to_cache_.clear();
+        file_to_cache_.clear();
 
-    tier_to_cache_.clear();
-    file_to_cache_.clear();
-
-    for (const auto& cache_definition : config_.cache_definitions) {
-        auto cache_instance = std::make_shared<CacheTier>(cache_definition);
-
-        {
-            if (auto res = cache_instance->Initialize(); !res) {
-                spdlog::error(
-                    "CacheManager::InitializeAll: Failed to initialize cache tier {} at path "
-                    "'{}': "
-                    "{}",
-                    cache_definition.tier, cache_definition.storage_definition.path.string(),
-                    res.error().message()
-                );
+        for (const auto& cache_definition : config_.cache_definitions) {
+            auto cache_instance = std::make_shared<CacheTier>(cache_definition);
+            if (auto res = cache_instance->Initialize(); !res)
                 return std::unexpected(res.error());
-            }
+
+            tier_to_cache_[cache_definition.tier].push_back(std::move(cache_instance));
         }
-
-        tier_to_cache_[cache_definition.tier].push_back(cache_instance);
     }
-
-    if (tier_to_cache_.empty()) {
-        spdlog::warn("CacheManager::InitializeAll: No cache tiers defined.");
-    }
-
     return {};
 }
 
@@ -127,54 +119,40 @@ StorageResult<void> CacheManager::ShutdownAll()
 StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fuse_path)
 {
     spdlog::debug("CacheManager::GetAttributes({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    struct stat origin_stat = {};
-    {
-        auto res = origin_->GetAttributes(fuse_path);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::GetAttributes failed for {}: Origin lookup error {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
-        origin_stat = res.value();
-    }
+    auto origin_stat_res = origin_->GetAttributes(fuse_path);
+    if (!origin_stat_res)
+        return std::unexpected(origin_stat_res.error());
+    struct stat origin_stat = origin_stat_res.value();
 
+    // validate (or evict) existing cache entry
+    std::shared_ptr<CacheTier> cache_tier;
     {
+        std::shared_lock meta_rlock(metadata_mutex_);
         auto it = file_to_cache_.find(fuse_path);
-        if (it == file_to_cache_.end()) {
-            spdlog::trace("CacheManager::GetAttributes: Cache miss for {}", fuse_path.string());
-            return origin_stat;
-        }
-        auto& cache_tier                  = it->second;
-        CoherencyMetadata origin_metadata = {origin_stat.st_mtime, origin_stat.st_size};
+        if (it != file_to_cache_.end())
+            cache_tier = it->second;
+    }
 
-        if (const auto res = cache_tier->IsCacheItemValid(fuse_path, origin_metadata);
-            !res || !res.value()) {
-            if (auto invalidate_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
-                !invalidate_res) {
-                spdlog::error(
-                    "CacheManager::GetAttributes: Failed to invalidate cache entry for {}: {}",
-                    fuse_path.string(), invalidate_res.error().message()
-                );
-            }
+    if (cache_tier) {
+        CoherencyMetadata origin_meta{origin_stat.st_mtime, origin_stat.st_size};
+        auto valid_res = cache_tier->IsCacheItemValid(fuse_path, origin_meta);
+        if (!valid_res || !valid_res.value()) {
+            RemoveMetadataInvalidateCache(fuse_path, cache_tier);  // ignore error, best‑effort
         }
     }
 
-    spdlog::trace("CacheManager::GetAttributes: Cache miss for {}", fuse_path.string());
     return origin_stat;
 }
-
 StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheManager::ListDirectory(
     const std::filesystem::path& fuse_path
 )
 {
     spdlog::debug("CacheManager::ListDirectory({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -187,59 +165,42 @@ StorageResult<size_t> CacheManager::ReadFile(
 )
 {
     spdlog::debug("CacheManager::ReadFile({}, {}, {})", fuse_path.string(), offset, buffer.size());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    // fast path : cached hit
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock meta_rlock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end())
+            cache_tier = it->second;
     }
 
-    {
-        auto cache_tier_it = file_to_cache_.find(fuse_path);
-        if (cache_tier_it != file_to_cache_.end()) {
-            const auto& cache_tier   = cache_tier_it->second;
-            auto origin_metadata_res = GetOriginCoherencyMetadata(fuse_path);
-            if (!origin_metadata_res) {
-                spdlog::error(
-                    "CacheManager::ReadFile: Failed to get origin metadata for {}: {}",
-                    fuse_path.string(), origin_metadata_res.error().message()
-                );
-                return std::unexpected(origin_metadata_res.error());
-            }
+    if (cache_tier) {
+        auto meta_res = GetOriginCoherencyMetadata(fuse_path);
+        if (!meta_res)
+            return std::unexpected(meta_res.error());
 
-            {
-                auto res = cache_tier->ReadItemIfCacheValid(
-                    fuse_path, offset, buffer, origin_metadata_res.value()
-                );
-                if (!res) {
-                    spdlog::error(
-                        "CacheManager::ReadFile: Cache read failed for {}: {}", fuse_path.string(),
-                        res.error().message()
-                    );
-                    return std::unexpected(res.error());
-                }
-                if (res.value().first) {
-                    spdlog::trace(
-                        "CacheManager::ReadFile: Cache hit for {}. Read {} bytes.",
-                        fuse_path.string(), res.value().second
-                    );
-                    TryPromoteItem(fuse_path);
-                    const auto& bytes_read = res.value().second;
-                    return bytes_read;
-                }
-            }
+        auto hit = cache_tier->ReadItemIfCacheValid(fuse_path, offset, buffer, meta_res.value());
+        if (!hit)
+            return std::unexpected(hit.error());
+        if (hit->first) {               // cache hit
+            TryPromoteItem(fuse_path);  // background promotion
+            return hit->second;
         }
     }
-    spdlog::trace(
-        "CacheManager::ReadFile: Cache miss for {}. Fetching from origin.", fuse_path.string()
-    );
 
+    // miss → fetch & (maybe) cache
     return FetchAndTryCache(fuse_path, offset, buffer);
 }
 
 StorageResult<size_t> CacheManager::WriteFile(
-    fs::path& fuse_path, off_t offset, std::span<const std::byte>& data
+    fs::path& fuse_path, off_t offset, std::span<std::byte>& data
 )
 {
     spdlog::debug("CacheManager::WriteFile({}, {}, {})", fuse_path.string(), offset, data.size());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -279,7 +240,7 @@ StorageResult<size_t> CacheManager::WriteFile(
 StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, mode_t mode)
 {
     spdlog::debug("CacheManager::CreateFile({}, {:o})", fuse_path.string(), mode);
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -288,7 +249,8 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
         auto res = origin_->CreateFile(fuse_path, mode);
         if (!res) {
             spdlog::error(
-                "CacheManager::CreateFile: Origin create failed for {}: {}", res.error().message()
+                "CacheManager::CreateFile: Origin create failed for {}: {}", fuse_path.string(),
+                res.error().message()
             );
             return std::unexpected(res.error());
         }
@@ -313,7 +275,7 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
 StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_path, mode_t mode)
 {
     spdlog::debug("CacheManager::CreateDirectory({}, {:o})", fuse_path.string(), mode);
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -348,7 +310,7 @@ StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_pa
 StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 {
     spdlog::debug("CacheManager::Remove({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -384,7 +346,7 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path, off_t size)
 {
     spdlog::debug("CacheManager::TruncateFile({}, {})", fuse_path.string(), size);
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     if (size < 0) {
@@ -472,7 +434,7 @@ StorageResult<void> CacheManager::Move(
 StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_path)
 {
     spdlog::debug("CacheManager::GetFilesystemStats({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty() || fuse_path == "/") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -491,101 +453,80 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
     spdlog::debug(
         "CacheManager::FetchAndTryCache({}, {}, {})", fuse_path.string(), offset, buffer.size()
     );
-
-    if (offset < 0) {
+    if (offset < 0)
         return std::unexpected(make_error_code(StorageErrc::InvalidOffset));
+    if (fuse_path.empty() || fuse_path == "/") {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    size_t bytes_read_from_origin = 0;
-    {
-        auto read_res = origin_->Read(fuse_path, offset, buffer);
-        if (!read_res) {
-            return std::unexpected(read_res.error());
-        }
-        bytes_read_from_origin = read_res.value();
-    }
+    auto origin_attr = origin_->GetAttributes(fuse_path);
+    if (!origin_attr)
+        return std::unexpected(origin_attr.error());
+    const size_t origin_size = static_cast<size_t>(origin_attr->st_size);
 
-    struct stat origin_stat = {};
-    {
-        auto attr_res = origin_->GetAttributes(fuse_path);
-        if (!attr_res) {
-            return std::unexpected(attr_res.error());
-        }
-        origin_stat = attr_res.value();
-    }
+    // Satisfy caller first (single read)
+    auto read_res = origin_->Read(fuse_path, offset, buffer);
+    if (!read_res)
+        return std::unexpected(read_res.error());
+    const size_t bytes_for_caller = *read_res;
 
-    const auto start_t     = std::chrono::steady_clock::now();
-    const auto origin_size = static_cast<size_t>(origin_stat.st_size);
-
-    ItemMetadata item_metadata{
-        .path = fuse_path,
-        .heat_metadata =
-            {.heat = 0.0, .fetch_cost_ms = 0.0, .last_access_time = std::time(nullptr)},
-        .coherency_metadata =
-            {.last_modified_time = origin_stat.st_mtime,
-                            .size_bytes         = static_cast<off_t>(origin_size)}
+    // Pick tier; if none, we are done
+    ItemMetadata meta{
+        fuse_path, {0.0, 0.0, std::time(nullptr)},
+         {origin_attr->st_mtime, origin_attr->st_size}
     };
-
-    auto tier_res = SelectCacheTierForWrite(item_metadata);
-    if (!tier_res) {
+    auto tier_res = SelectCacheTierForWrite(meta);
+    if (!tier_res)
         return std::unexpected(tier_res.error());
-    }
-    auto cache_tier = tier_res.value();
-    if (!cache_tier) {
-        return bytes_read_from_origin;
-    }
+    auto tier = tier_res.value();
+    if (!tier)
+        return bytes_for_caller;
 
-    // Read full file for caching
-    std::vector<std::byte> staging(origin_size);
-    std::span<std::byte> staging_span{staging};
-    {
-        auto full_res = origin_->Read(fuse_path, 0, staging_span);
-        if (!full_res) {
-            return std::unexpected(full_res.error());
-        }
-        if (full_res.value() != origin_size) {
+    // Stream from origin to tier in 1‑MiB blocks to avoid giant vec
+    constexpr std::size_t kBlk = 1 << 20;
+    std::vector<std::byte> blk(kBlk);
+    std::span<std::byte> blk_span{blk};
+    size_t total_read = 0;
+    while (total_read < origin_size) {
+        const size_t want = std::min(kBlk, origin_size - total_read);
+        blk_span          = {blk.data(), want};
+        auto r            = origin_->Read(fuse_path, static_cast<off_t>(total_read), blk_span);
+        if (!r)
+            return std::unexpected(r.error());
+        if (*r == 0)
+            break;
+        std::span<std::byte> cblk{blk.data(), *r};
+        auto w = tier->Write(fuse_path, static_cast<off_t>(total_read), cblk);
+        if (!w || *w != *r)
             return std::unexpected(make_error_code(StorageErrc::IOError));
-        }
+        total_read += *r;
     }
-    const auto elapsed_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_t)
-            .count();
-
-    item_metadata.heat_metadata.fetch_cost_ms = elapsed_ms;
-    item_metadata.heat_metadata.heat          = 1.0;
-
-    auto cache_res = cache_tier->CacheItemIfWorthIt(fuse_path, 0, staging_span, item_metadata);
-    if (!cache_res) {
-        return std::unexpected(cache_res.error());
+    tier->ReheatItem(fuse_path);
+    {
+        std::unique_lock w_lock(metadata_mutex_);
+        file_to_cache_[fuse_path] = tier;
     }
-    if (cache_res.value()) {
-        file_to_cache_[fuse_path] = cache_tier;
-    }
-
-    return bytes_read_from_origin;
+    return bytes_for_caller;
 }
-
 StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
     const ItemMetadata& item_metadata
 )
 {
+    std::shared_lock tiers_rlock(tier_mutex_);  // hierarchy: tier_mutex_ before metadata_mutex_
     spdlog::debug("CacheManager::SelectCacheTierForWrite({})", item_metadata.path.string());
-    if (tier_to_cache_.empty()) {
-        return nullptr;  // caching disabled – not an error
-    }
+    if (tier_to_cache_.empty())
+        return nullptr;  // no cache at all
 
-    for (auto& [tier_num, tier_vec] : tier_to_cache_) {
-        for (const auto& tier : tier_vec) {
-            auto worth_res = tier->IsItemWorthInserting(item_metadata);
-            if (!worth_res) {
-                return std::unexpected(worth_res.error());
-            }
-            if (worth_res.value()) {
-                return tier;  // first acceptable tier wins
-            }
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {  // slowest first
+        for (const auto& tier : it->second) {
+            auto worth = tier->IsItemWorthInserting(item_metadata);
+            if (!worth)
+                return std::unexpected(worth.error());
+            if (*worth)
+                return tier;  // first slow tier that accepts
         }
     }
-    return nullptr;
+    return nullptr;  // nothing suitable
 }
 
 StorageResult<void> CacheManager::RemoveMetadataInvalidateCache(
@@ -611,60 +552,60 @@ StorageResult<void> CacheManager::RemoveMetadataInvalidateCache(
 StorageResult<void> CacheManager::TryPromoteItem(fs::path& fuse_path)
 {
     spdlog::debug("CacheManager::TryPromoteItem({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path != "/") {
+    if (fuse_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-    }
 
-    const auto it = file_to_cache_.find(fuse_path);
-    if (it == file_to_cache_.end()) {
+    // snapshot current tier under metadata lock
+    std::shared_ptr<CacheTier> current_tier;
+    {
+        std::shared_lock meta_rlock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it == file_to_cache_.end())
+            return {};
+        current_tier = it->second;
+    }
+    const size_t current_level = current_tier->GetTier();
+    if (current_level == 0)  // already hottest tier
         return {};
-    }
-    const auto& current_tier = it->second;
 
-    // Find all tiers strictly lower number (higher speed) than current
-    const auto current_level = current_tier->GetTier();
-    auto next_it             = tier_to_cache_.find(current_level - 1);
-    if (next_it == tier_to_cache_.end()) {
+    // collect faster tiers (lower tier index)
+    std::vector<std::shared_ptr<CacheTier>> faster_tiers;
+    {
+        std::shared_lock tiers_rlock(tier_mutex_);
+        for (const auto& [lvl, vec] : tier_to_cache_) {
+            if (lvl < current_level)
+                faster_tiers.insert(faster_tiers.end(), vec.begin(), vec.end());
+        }
+    }
+    if (faster_tiers.empty())
         return {};
-    }
 
-    // Retrieve metadata
+    // fetch metadata & data once from current tier (under tier lock)
     auto meta_res = current_tier->GetItemMetadata(fuse_path);
     if (!meta_res)
         return std::unexpected(meta_res.error());
-    const ItemMetadata item_meta = meta_res.value();
+    const ItemMetadata meta = meta_res.value();
 
-    // Attempt promotion to any candidate tier at the faster level
-    for (const auto& faster_tier : next_it->second) {
-        auto worth_res = faster_tier->IsItemWorthInserting(item_meta);
-        if (!worth_res) {
-            return std::unexpected(worth_res.error());
-        }
-        if (!worth_res.value()) {
+    std::vector<std::byte> buf(meta.coherency_metadata.size_bytes);
+    std::span<std::byte> span{buf};
+    auto read_res = current_tier->Read(fuse_path, 0, span);
+    if (!read_res || *read_res != span.size())
+        return std::unexpected(read_res ? make_error_code(StorageErrc::IOError) : read_res.error());
+
+    // attempt promotion into the first tier that accepts it
+    for (const auto& faster : faster_tiers) {
+        auto worth = faster->IsItemWorthInserting(meta);
+        if (!worth)
+            return std::unexpected(worth.error());
+        if (!*worth)
             continue;
-        }
 
-        // read from origin to avoid propagating corrupted data
-        const auto size_bytes = item_meta.coherency_metadata.size_bytes;
-        std::vector<std::byte> buf(size_bytes);
-        std::span<std::byte> span{buf};
-        auto read_res = origin_->Read(fuse_path, 0, span);
-        if (!read_res) {
-            return std::unexpected(read_res.error());
+        faster->CacheItemForcibly(fuse_path, 0, span, meta);
+        {
+            std::unique_lock meta_wlock(metadata_mutex_);
+            file_to_cache_[fuse_path] = faster;
         }
-        // write into faster tier
-        auto cache_res = faster_tier->CacheItemForcibly(fuse_path, 0, span, item_meta);
-        if (!cache_res) {
-            return std::unexpected(cache_res.error());
-        }
-
-        // demote from slower tier
-        auto invalidate_res = current_tier->InvalidateAndRemoveItem(fuse_path);
-        std::unique_lock lock(metadata_mutex_);
-        file_to_cache_[fuse_path] = faster_tier;
-        if (!invalidate_res) {
-            return std::unexpected(invalidate_res.error());
-        }
+        current_tier->InvalidateAndRemoveItem(fuse_path);  // best‑effort
         break;
     }
     return {};

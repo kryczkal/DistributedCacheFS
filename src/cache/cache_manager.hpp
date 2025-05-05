@@ -76,7 +76,7 @@ class CacheManager
 
     StorageResult<size_t> WriteFile(
         std::filesystem::path& fuse_path, off_t offset,
-        std::span<const std::byte>& data
+        std::span<std::byte>& data
     );  // Implements write policy
 
     StorageResult<void> CreateFile(
@@ -117,7 +117,7 @@ class CacheManager
     );
 
     /// Selects a cache tier for writing new data (based on tier prio, space)
-    StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
+    StorageResult<std::shared_ptr<CacheTier>> SelectCacheTierForWrite(
         const ItemMetadata& item_metadata
     );
 
@@ -145,7 +145,8 @@ class CacheManager
     FileToCacheMap file_to_cache_;  ///< Map of file paths to cache tiers
 
     /** Protects item_metadatas_ */
-    mutable std::shared_mutex metadata_mutex_;
+    mutable std::shared_mutex metadata_mutex_;  ///< Guards file_to_cache_
+    mutable std::shared_mutex tier_mutex_;      ///< Guards tier_to_cache_
 
     //------------------------------------------------------------------------------//
     // Helpers

@@ -122,6 +122,9 @@ int StorageResultToErrno(const StorageResult<T>& result)
         return 0;
     } else {
         const std::error_code& ec = result.error();
+        if (ec.category() == std::generic_category() || ec.category() == std::system_category()) {
+            return -ec.value();  // ensure negative errno
+        }
         if (ec.category() == Storage::storage_error_category) {
             switch (static_cast<StorageErrc>(ec.value())) {
                 case StorageErrc::Success:
@@ -167,7 +170,7 @@ int StorageResultToErrno(const StorageResult<T>& result)
             }
         } else {
             // If it's a generic error code (e.g., from std::filesystem)
-            return -ec.value();  // Return negative errno heat
+            return -EIO;  // Return negative errno heat
         }
     }
 }

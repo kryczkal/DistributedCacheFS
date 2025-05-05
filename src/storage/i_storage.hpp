@@ -47,7 +47,7 @@ class IStorage
     ) = 0;
 
     virtual StorageResult<std::size_t> Write(
-        const std::filesystem::path& relative_path, off_t offset, std::span<const std::byte>& data
+        const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& data
     ) = 0;
 
     virtual StorageResult<void> Remove(const std::filesystem::path& relative_path) = 0;

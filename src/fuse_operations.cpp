@@ -37,13 +37,12 @@ inline Cache::CacheManager *get_coordinator()
 inline void sanitize_fuse_path(std::filesystem::path &fuse_path)
 {
     spdlog::trace("FUSE: sanitize_fuse_path({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path == "/") {
-        fuse_path = ".";
-    }
-    // Remove leading slash to get relative path
-    if (fuse_path.has_root_directory()) {
-        fuse_path = fuse_path.relative_path();
-    }
+    if (fuse_path.empty())
+        return;
+    if (fuse_path == "/")
+        return;
+    if (fuse_path.has_root_directory())  // strip leading '/'
+        fuse_path = fuse_path.lexically_relative("/");
 }
 
 inline fs::path get_fuse_path(const char *path)
@@ -345,7 +344,7 @@ int write(
     if (!coordinator)
         return -EIO;
 
-    std::span<const std::byte> data_span{reinterpret_cast<const std::byte *>(buf), size};
+    std::span<std::byte> data_span{reinterpret_cast<std::byte *>(const_cast<char *>(buf)), size};
 
     auto fuse_path = FuseOps::get_fuse_path(path);
     auto result    = coordinator->WriteFile(fuse_path, offset, data_span);

@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "storage/local_storage.hpp"
+
 int main(int argc, char *argv[])
 {
     // Command Line argument parsing
@@ -69,14 +71,19 @@ int main(int argc, char *argv[])
     }
 
     // Setup Core Components
-    std::unique_ptr<DistributedCacheFS::Origin::OriginManager> origin_manager;
+    std::unique_ptr<DistributedCacheFS::Storage::IStorage> origin;
     std::unique_ptr<DistributedCacheFS::Cache::CacheManager> cache_coordinator;
     try {
-        origin_manager =
-            std::make_unique<DistributedCacheFS::Origin::OriginManager>(config_result.value().origin
-            );
+        origin = std::make_unique<DistributedCacheFS::Storage::LocalStorage>(
+            config_result.value().origin_definition
+        );
+    } catch (const std::exception &e) {
+        spdlog::critical("Error initializing origin storage: {}", e.what());
+        return EXIT_FAILURE;
+    }
+    try {
         cache_coordinator = std::make_unique<DistributedCacheFS::Cache::CacheManager>(
-            config_result.value(), origin_manager.get()
+            config_result.value(), std::move(origin)
         );
     } catch (const std::exception &e) {
         spdlog::critical("Error initializing components: {}", e.what());
@@ -107,10 +114,9 @@ int main(int argc, char *argv[])
     spdlog::info("Using Node ID: {}", config_result.value().node_id);
 
     // Setup Filesystem Context
-    auto context_ptr            = std::make_unique<DistributedCacheFS::FileSystemContext>();
-    context_ptr->config         = std::move(config_result.value());
-    context_ptr->origin_manager = std::move(origin_manager);
-    context_ptr->cache_manager  = std::move(cache_coordinator);
+    auto context_ptr           = std::make_unique<DistributedCacheFS::FileSystemContext>();
+    context_ptr->config        = std::move(config_result.value());
+    context_ptr->cache_manager = std::move(cache_coordinator);
 
     // Construct arguments for fuse_main
     std::vector<char *> fuse_argv;
