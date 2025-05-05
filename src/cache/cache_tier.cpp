@@ -203,6 +203,23 @@ StorageResult<const ItemMetadata> CacheTier::GetItemMetadata(const fs::path &fus
     }
     return *it;
 }
+StorageResult<void> CacheTier::InsertItemMetadata(const ItemMetadata &item_metadata)
+{
+    std::lock_guard lock(cache_mutex_);
+    spdlog::debug(
+        "CacheTier::InsertItemMetadata({}, {})", item_metadata.path.string(),
+        item_metadata.coherency_metadata.size_bytes
+    );
+    auto [it, inserted] = item_metadatas_.insert(item_metadata);
+    if (!inserted) {
+        spdlog::error(
+            "CacheTier::InsertItemMetadata: Item {} already exists in metadata.",
+            item_metadata.path.string()
+        );
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+    return {};
+}
 StorageResult<bool> CacheTier::CacheItemIfWorthIt(
     const std::filesystem::path &fuse_path, off_t offset, std::span<std::byte> &data,
     const ItemMetadata &item_metadata
@@ -405,7 +422,9 @@ double CacheTier::CalculateInitialItemHeat(
     const fs::path &fuse_path, const ItemMetadata &item_metadata
 )
 {
-    spdlog::debug("CacheTier::CalculateInitialHeat({}, {})", fuse_path.string(), item_metadata.path.string());
+    spdlog::debug(
+        "CacheTier::CalculateInitialHeat({}, {})", fuse_path.string(), item_metadata.path.string()
+    );
     if (item_metadata.coherency_metadata.size_bytes < 0) {
         return 0.0;
     }
@@ -417,8 +436,8 @@ double CacheTier::CalculateInitialItemHeat(
         (size_bytes >= 0) ? (fetch_cost / (static_cast<double>(size_bytes) + 1.0)) : 0.0;
     double heat = base_value;
     spdlog::trace(
-        "CacheTier::CalculateInitialHeat: Heat for {}: {} (base_value: {})",
-        fuse_path.string(), heat, base_value
+        "CacheTier::CalculateInitialHeat: Heat for {}: {} (base_value: {})", fuse_path.string(),
+        heat, base_value
     );
     return heat;
 }

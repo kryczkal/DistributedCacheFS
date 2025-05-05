@@ -477,7 +477,9 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
 
     // Pick tier; if none, we are done
 
-    const auto fetch_cost_ms = static_cast<double>(elapsed.count());
+    const auto fetch_cost_ms = static_cast<double>(elapsed.count()) > 0.0
+                                   ? static_cast<double>(elapsed.count())
+                                   : 1.0;  // avoid zero
     ItemMetadata meta{
         fuse_path,
         {0.0, fetch_cost_ms, std::time(nullptr)},
@@ -510,7 +512,16 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
             return std::unexpected(make_error_code(StorageErrc::IOError));
         total_read += *r;
     }
-    tier->ReheatItem(fuse_path);
+
+    auto insert_meta_res = tier->InsertItemMetadata(meta);
+    if (!insert_meta_res) {
+        spdlog::error(
+            "CacheManager::FetchAndTryCache: Failed to insert item metadata: {}",
+            insert_meta_res.error().message()
+        );
+        return std::unexpected(insert_meta_res.error());
+    }
+
     {
         std::unique_lock w_lock(metadata_mutex_);
         file_to_cache_[fuse_path] = tier;

@@ -129,6 +129,8 @@ class CacheTier : public Storage::IStorage
 
     StorageResult<const ItemMetadata> GetItemMetadata(const fs::path& fuse_path);
 
+    StorageResult<void> InsertItemMetadata(const ItemMetadata& item_metadata);
+
     private:
     //------------------------------------------------------------------------------//
     // Private Methods
