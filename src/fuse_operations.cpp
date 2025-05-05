@@ -40,7 +40,7 @@ inline void sanitize_fuse_path(std::filesystem::path &fuse_path)
     if (fuse_path.empty())
         return;
     if (fuse_path == "/")
-        return;
+        fuse_path = fs::path(".");
     if (fuse_path.has_root_directory())  // strip leading '/'
         fuse_path = fuse_path.lexically_relative("/");
 }
