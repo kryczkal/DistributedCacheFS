@@ -310,6 +310,10 @@ StorageResult<bool> CacheTier::IsCacheItemValid(
 StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) const
 {
     std::lock_guard lock(cache_mutex_);
+    spdlog::trace(
+        "CacheTier::IsItemWorthInserting({}, {})", item.path.string(),
+        item.coherency_metadata.size_bytes
+    );
 
     auto avail_res = storage_instance_->GetAvailableBytes();
     if (!avail_res)
@@ -375,7 +379,6 @@ double CacheTier::CalculateItemHeat(
     const fs::path &fuse_path, const ItemMetadata &item_metadata, time_t current_time
 ) const
 {
-    std::lock_guard lock(cache_mutex_);
     spdlog::debug("CacheTier::CalculateHeat({}, {})", fuse_path.string(), current_time);
     if (item_metadata.coherency_metadata.size_bytes < 0) {
         return 0.0;
@@ -398,9 +401,31 @@ double CacheTier::CalculateItemHeat(
     );
     return heat;
 }
+double CacheTier::CalculateInitialItemHeat(
+    const fs::path &fuse_path, const ItemMetadata &item_metadata
+)
+{
+    spdlog::debug("CacheTier::CalculateInitialHeat({}, {})", fuse_path.string());
+    if (item_metadata.coherency_metadata.size_bytes < 0) {
+        return 0.0;
+    }
+
+    const auto &fetch_cost = item_metadata.heat_metadata.fetch_cost_ms;
+    const auto &size_bytes = item_metadata.coherency_metadata.size_bytes;
+
+    double base_value =
+        (size_bytes >= 0) ? (fetch_cost / (static_cast<double>(size_bytes) + 1.0)) : 0.0;
+    double heat = base_value;
+    spdlog::trace(
+        "CacheTier::CalculateInitialHeat: Heat for {}: {} (base_value: {}, decay_factor: {})",
+        fuse_path.string(), heat, base_value
+    );
+    return heat;
+}
 void CacheTier::ReheatItem(const fs::path &fuse_path)
 {
     std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+    spdlog::trace("CacheTier::ReheatItem({})", fuse_path.string());
 
     auto it = item_metadatas_.find(fuse_path);
     if (it == item_metadatas_.end())

@@ -169,6 +169,10 @@ class CacheTier : public Storage::IStorage
         const fs::path& fuse_path, const ItemMetadata& item_metadata, time_t current_time
     ) const;
 
+    static double CalculateInitialItemHeat(
+        const fs::path& fuse_path, const ItemMetadata& item_metadata
+    );
+
     //------------------------------------------------------------------------------//
     // Private Fields
     //------------------------------------------------------------------------------//

@@ -466,17 +466,25 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
     const size_t origin_size = static_cast<size_t>(origin_attr->st_size);
 
     // Satisfy caller first (single read)
+    auto now      = std::chrono::system_clock::now();
     auto read_res = origin_->Read(fuse_path, offset, buffer);
+    auto elapsed  = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now() - now
+    );
     if (!read_res)
         return std::unexpected(read_res.error());
     const size_t bytes_for_caller = *read_res;
 
     // Pick tier; if none, we are done
+
+    const auto fetch_cost_ms = static_cast<double>(elapsed.count());
     ItemMetadata meta{
-        fuse_path, {0.0, 0.0, std::time(nullptr)},
-         {origin_attr->st_mtime, origin_attr->st_size}
+        fuse_path,
+        {0.0, fetch_cost_ms, std::time(nullptr)},
+        {origin_attr->st_mtime, origin_attr->st_size}
     };
-    auto tier_res = SelectCacheTierForWrite(meta);
+    meta.heat_metadata.heat = CacheTier::CalculateInitialItemHeat(fuse_path, meta);
+    auto tier_res           = SelectCacheTierForWrite(meta);
     if (!tier_res)
         return std::unexpected(tier_res.error());
     auto tier = tier_res.value();
@@ -523,10 +531,19 @@ StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
             auto worth = tier->IsItemWorthInserting(item_metadata);
             if (!worth)
                 return std::unexpected(worth.error());
-            if (*worth)
+            if (*worth) {
+                spdlog::trace(
+                    "CacheManager::SelectCacheTierForWrite: Found cache tier {} for {}",
+                    tier->GetTier(), item_metadata.path.string()
+                );
                 return tier;  // first slow tier that accepts
+            }
         }
     }
+    spdlog::trace(
+        "CacheManager::SelectCacheTierForWrite: No cache tier found for {}",
+        item_metadata.path.string()
+    );
     return nullptr;  // nothing suitable
 }
 
