@@ -345,6 +345,11 @@ StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
         );
         return std::unexpected(MapFilesystemError(ec, "get_capacity"));
     }
+    if (definition_.max_size_gb.has_value()) {
+        const uint64_t max_size_bytes =
+            static_cast<uint64_t>(*definition_.max_size_gb) * 1024ULL * 1024ULL * 1024ULL;
+        return std::min(space.capacity, max_size_bytes);
+    }
     return space.capacity;
 }
 
