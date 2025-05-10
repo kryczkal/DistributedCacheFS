@@ -266,7 +266,8 @@ StorageResult<void> CacheTier::CacheItemForcibly(
         auto res = FreeUpSpace(item_metadata.coherency_metadata.size_bytes);
         if (!res) {
             spdlog::error(
-                "CacheTier::InsertIfWorth: Failed to free up space: {}", res.error().message()
+                "CacheTier::CacheItemForcibly: Failed to free up space for item '{}': {}", 
+                fuse_path.string(), res.error().message()
             );
             return std::unexpected(res.error());
         }
@@ -342,7 +343,7 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) co
         return true;
 
     // Simulate eviction of coldest items until either we have enough space
-    // or the cumulative heat of evicted items exceeds the candidate’s heat.
+    // or the cumulative heat of evicted items exceeds the candidate's heat.
     size_t would_free   = 0;
     double heat_tally   = 0.0;
     const auto &by_heat = item_metadatas_.get<CacheTier::by_heat>();

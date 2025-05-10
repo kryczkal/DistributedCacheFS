@@ -345,10 +345,8 @@ StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
         );
         return std::unexpected(MapFilesystemError(ec, "get_capacity"));
     }
-    if (definition_.max_size_gb.has_value()) {
-        const uint64_t max_size_bytes =
-            static_cast<uint64_t>(*definition_.max_size_gb) * 1024ULL * 1024ULL * 1024ULL;
-        return std::min(space.capacity, max_size_bytes);
+    if (definition_.max_size_bytes.has_value()) {
+        return std::min(space.capacity, *definition_.max_size_bytes);
     }
     return space.capacity;
 }
@@ -356,35 +354,80 @@ StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
 StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    // TODO: Implement accurate tracking.
-    // For now, estimate based on capacity - available.
-    auto capacity_res = GetCapacityBytes();
-    if (!capacity_res)
-        return std::unexpected(capacity_res.error());
-    auto available_res = GetAvailableBytes();
-    if (!available_res)
-        return std::unexpected(available_res.error());
 
-    if (*capacity_res >= *available_res) {
-        return *capacity_res - *available_res;
-    } else {
-        return 0;
+    // TODO: Implement accurate tracking of used bytes.
+    // This currently estimates based on capacity - available from fs::space_info,
+    // which is NOT accurate if definition_.max_size_bytes is set and it's different
+    //
+    // For accurate cache eviction, this MUST return the sum of sizes of all files
+    // and directories managed by this LocalStorage instance within its base_path_.
+    //
+    // Suggested approach:
+    // 1. Add a member: `mutable std::uint64_t current_managed_size_bytes_ = 0;`
+    // 2. Add a member: `mutable bool has_scanned_initial_size_ = false;`
+    // 3. In Initialize():
+    //    - Scan base_path_ recursively.
+    //    - Sum the sizes of all files.
+    //    - Store in `current_managed_size_bytes_`.
+    //    - Set `has_scanned_initial_size_ = true;`
+    // 4. In Write(), CreateFile(), Truncate():
+    //    - Atomically update `current_managed_size_bytes_` based on the change in file size.
+    //    - Be careful with Truncate: it can increase or decrease size.
+    //    - Ensure these operations correctly report the number of bytes *actually* written/changed.
+    // 5. In Remove():
+    //    - Atomically decrement `current_managed_size_bytes_` by the size of the removed file.
+    // 6. GetUsedBytes() would then simply return `current_managed_size_bytes_`.
+    //    (after ensuring initial scan has happened).
+    //
+    // For now, using a highly simplified and potentially INACCURATE estimation for placeholder:
+    // This estimation will behave poorly if max_size_bytes is much smaller than actual disk space.
+    fs::space_info space_val = fs::space(base_path_);
+    uint64_t actual_capacity = space_val.capacity;
+    uint64_t actual_free = space_val.free;
+    uint64_t actual_used = actual_capacity > actual_free ? actual_capacity - actual_free : 0;
+
+    if (definition_.max_size_bytes.has_value()) {
+        return std::min(actual_used, *definition_.max_size_bytes);
     }
+    return actual_used;
 }
 
 StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     std::error_code ec;
-    fs::space_info space = fs::space(base_path_, ec);
+    fs::space_info space = fs::space(base_path_, ec); // Actual free space on the physical device
     if (ec) {
         spdlog::error(
-            "LocalStorage::GetFreeBytes: fs::space failed for '{}': {}", base_path_.string(),
+            "LocalStorage::GetAvailableBytes: fs::space failed for '{}': {}", base_path_.string(),
             ec.message()
         );
-        return std::unexpected(MapFilesystemError(ec, "get_free"));
+        return std::unexpected(MapFilesystemError(ec, "get_available"));
     }
-    return space.free;
+
+    uint64_t actual_filesystem_free_space = space.available;
+
+    if (definition_.max_size_bytes.has_value()) {
+        uint64_t defined_capacity = *definition_.max_size_bytes;
+        
+        // This relies on GetUsedBytes() being accurate.
+        auto used_bytes_res = GetUsedBytes(); 
+        if (!used_bytes_res) {
+            spdlog::error("LocalStorage::GetAvailableBytes: Failed to get used bytes: {}", used_bytes_res.error().message());
+            return std::unexpected(used_bytes_res.error());
+        }
+        uint64_t current_managed_used_bytes = used_bytes_res.value();
+
+        uint64_t available_within_defined_limit;
+        if (defined_capacity <= current_managed_used_bytes) {
+            available_within_defined_limit = 0;
+        } else {
+            available_within_defined_limit = defined_capacity - current_managed_used_bytes;
+        }
+        return std::min(available_within_defined_limit, actual_filesystem_free_space);
+    }
+    
+    return actual_filesystem_free_space;
 }
 
 StorageResult<std::size_t> LocalStorage::Read(

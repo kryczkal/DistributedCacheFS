@@ -59,9 +59,9 @@ struct StorageDefinition {
     std::optional<SharedStorage> policy;     ///< Required if type is Shared
     std::optional<std::string> share_group;  ///< Required if type is Shared
 
-    // Size limits are relevant for 'divide' policy
-    std::optional<double> min_size_gb;
-    std::optional<double> max_size_gb;
+    // Size limits
+    std::optional<uint64_t> min_size_bytes;
+    std::optional<uint64_t> max_size_bytes;
 
     bool IsValid() const;
 };
@@ -185,16 +185,18 @@ inline bool StorageDefinition::IsValid() const
             return false;
         }
         if (policy.value() == SharedStorage::Divide) {
-            if (min_size_gb.has_value() && max_size_gb.has_value() && *min_size_gb > *max_size_gb) {
-                return false;
-            }
-            if (min_size_gb.has_value() && *min_size_gb < 0) {
+            if (min_size_bytes.has_value() && max_size_bytes.has_value() &&
+                *min_size_bytes > *max_size_bytes) {
                 return false;
             }
         }
     } else {
-        if (policy.has_value() || share_group.has_value() || min_size_gb.has_value() ||
-            max_size_gb.has_value()) {
+        if (policy.has_value() || share_group.has_value()) {
+            spdlog::warn("Policy or share_group specified for non-shared storage type.");
+        }
+        if (min_size_bytes.has_value() && max_size_bytes.has_value() &&
+            *min_size_bytes > *max_size_bytes) {
+            spdlog::error("min_size_bytes ({}) cannot exceed max_size_bytes ({}) for local storage.", *min_size_bytes, *max_size_bytes);
             return false;
         }
     }
