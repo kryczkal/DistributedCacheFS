@@ -3,6 +3,7 @@
 
 #include "config/config_types.hpp"
 #include "storage/i_storage.hpp"
+#include "cache_stats.hpp"
 
 #include "boost/multi_index/hashed_index.hpp"
 #include "boost/multi_index/indexed_by.hpp"
@@ -11,6 +12,7 @@
 #include "boost/multi_index_container.hpp"
 
 #include <filesystem>
+
 
 namespace DistributedCacheFS::Cache
 {
@@ -183,12 +185,13 @@ class CacheTier : public Storage::IStorage
     std::unique_ptr<Storage::IStorage> storage_instance_;  ///< Storage instance
     ItemMetadataContainer item_metadatas_;
     mutable std::recursive_mutex cache_mutex_;  ///< Mutex for cache operations
+    CacheStats stats_; ///< Stats for this cache tier
 
     //------------------------------------------------------------------------------//
     // Helpers
     //------------------------------------------------------------------------------//
 
-    inline bool InvalidFusePath(const fs::path& p) { return p.empty() || p == "/"; }
+    inline bool InvalidFusePath(const fs::path& p) { return p.empty() || p == "." || p == ".." || p == "/"; }
 
     friend class CacheManager;  ///< Allow CacheManager to access private members
 };
