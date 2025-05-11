@@ -9,8 +9,8 @@
 #include "boost/multi_index_container.hpp"
 
 #include <filesystem>
-#include <random>
 #include <numeric>
+#include <random>
 #include <system_error>
 
 namespace DistributedCacheFS::Cache
@@ -33,65 +33,52 @@ CacheTier::CacheTier(const Config::CacheDefinition &cache_definition)
         }
         storage_instance_ = std::move(res.value());
     }
-
-    // Initialize CacheStats
-    if (cache_definition_.storage_definition.max_size_bytes.has_value()) {
-        stats_.SetMaxSizeBytes(cache_definition_.storage_definition.max_size_bytes.value());
-        stats_.SetUsesSizeTracking(true);
-        spdlog::info("CacheTier tier {} configured with max size: {} bytes", cache_definition_.tier, stats_.GetMaxSizeBytes());
-    } else {
-        stats_.SetUsesSizeTracking(false);
-        spdlog::warn("CacheTier tier {} configured with no max size. Size tracking will be disabled.", cache_definition_.tier);
-    }
 }
 
 StorageResult<std::uint64_t> CacheTier::GetCapacityBytes() const
 {
-    if (stats_.UsesSizeTracking()) {
-        spdlog::debug("CacheTier::GetCapacityBytes(tier={}) -> {}", cache_definition_.tier, stats_.GetMaxSizeBytes());
-        return stats_.GetMaxSizeBytes();
-    } else {
-        auto res = storage_instance_->GetCapacityBytes();
-        if (!res) {
-            spdlog::error("CacheTier::GetCapacityBytes(tier={}) -> Error: {}", cache_definition_.tier, res.error().message());
-            return std::unexpected(res.error());
-        }
-        spdlog::debug("CacheTier::GetCapacityBytes(tier={}) -> {}", cache_definition_.tier, *res);
-        return *res;
+    std::lock_guard lock(cache_mutex_);
+    spdlog::debug("CacheTier::GetCapacityBytes(tier={})", cache_definition_.tier);
+    auto res = storage_instance_->GetCapacityBytes();
+    if (!res) {
+        spdlog::error(
+            "CacheTier::GetCapacityBytes(tier={}) -> Error: {}", cache_definition_.tier,
+            res.error().message()
+        );
+        return std::unexpected(res.error());
     }
+    spdlog::trace("CacheTier::GetCapacityBytes(tier={}) -> {}", cache_definition_.tier, *res);
+    return *res;
 }
 StorageResult<std::uint64_t> CacheTier::GetUsedBytes() const
 {
-    if (stats_.UsesSizeTracking()) {
-        spdlog::debug("CacheTier::GetUsedBytes(tier={}) -> {}", cache_definition_.tier, stats_.GetCurrentSizeBytes());
-        return stats_.GetCurrentSizeBytes();
-    } else {
-        auto res = storage_instance_->GetUsedBytes();
-        if (!res) {
-            spdlog::error("CacheTier::GetUsedBytes(tier={}) -> Error: {}", cache_definition_.tier, res.error().message());
-            return std::unexpected(res.error());
-        }
-        spdlog::debug("CacheTier::GetUsedBytes(tier={}) -> {}", cache_definition_.tier, *res);
-        return *res;
+    std::lock_guard lock(cache_mutex_);
+    spdlog::debug("CacheTier::GetUsedBytes(tier={})", cache_definition_.tier);
+    auto res = storage_instance_->GetUsedBytes();
+    if (!res) {
+        spdlog::error(
+            "CacheTier::GetUsedBytes(tier={}) -> Error: {}", cache_definition_.tier,
+            res.error().message()
+        );
+        return std::unexpected(res.error());
     }
+    spdlog::trace("CacheTier::GetUsedBytes(tier={}) -> {}", cache_definition_.tier, *res);
+    return *res;
 }
 StorageResult<std::uint64_t> CacheTier::GetAvailableBytes() const
 {
-    if (stats_.UsesSizeTracking()) {
-        uint64_t used = stats_.GetCurrentSizeBytes();
-        uint64_t max_size = stats_.GetMaxSizeBytes();
-        uint64_t available = (max_size > used) ? (max_size - used) : 0;
-        spdlog::debug("CacheTier::GetAvailableBytes(tier={}) -> {}", cache_definition_.tier, available);
-        return available;
-    } else {
-        auto res = storage_instance_->GetAvailableBytes();
-        if (!res) {
-            spdlog::error("CacheTier::GetAvailableBytes(tier={}) -> Error: {}", cache_definition_.tier, res.error().message());
-            return std::unexpected(res.error());
-        }
-        spdlog::debug("CacheTier::GetAvailableBytes(tier={}) -> {}", cache_definition_.tier, *res);
-        return *res;
+    std::lock_guard lock(cache_mutex_);
+    spdlog::debug("CacheTier::GetAvailableBytes(tier={})", cache_definition_.tier);
+    auto res = storage_instance_->GetAvailableBytes();
+    if (!res) {
+        spdlog::error(
+            "CacheTier::GetAvailableBytes(tier={}) -> Error: {}", cache_definition_.tier,
+            res.error().message()
+        );
+        return std::unexpected(res.error());
     }
+    spdlog::trace("CacheTier::GetAvailableBytes(tier={}) -> {}", cache_definition_.tier, *res);
+    return *res;
 }
 StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
     const fs::path &fuse_path, off_t offset, std::span<std::byte> &buffer,
@@ -208,11 +195,14 @@ StorageResult<void> CacheTier::Remove(const std::filesystem::path &fuse_path)
         );
     return result;
 }
-StorageResult<void> CacheTier::Truncate(const std::filesystem::path &fuse_path, off_t new_size_bytes)
+StorageResult<void> CacheTier::Truncate(
+    const std::filesystem::path &fuse_path, off_t new_size_bytes
+)
 {
     std::lock_guard lock(cache_mutex_);
     spdlog::debug(
-        "CacheTier::Truncate(tier={}, {}, {})", cache_definition_.tier, fuse_path.string(), new_size_bytes
+        "CacheTier::Truncate(tier={}, {}, {})", cache_definition_.tier, fuse_path.string(),
+        new_size_bytes
     );
     auto result = storage_instance_->Truncate(fuse_path, new_size_bytes);
     if (result)
@@ -335,7 +325,7 @@ StorageResult<struct stat> CacheTier::GetAttributes(const std::filesystem::path 
     return result;
 }
 StorageResult<void> CacheTier::Initialize()
-{ 
+{
     std::lock_guard lock(cache_mutex_);
     spdlog::debug("CacheTier::Initialize(tier={})", cache_definition_.tier);
 
@@ -343,15 +333,25 @@ StorageResult<void> CacheTier::Initialize()
     fs::path cache_path = cache_definition_.storage_definition.path;
     if (fs::exists(cache_path, ec)) {
         if (ec) {
-            spdlog::error("CacheTier::Initialize(tier={}): Failed to check if cache folder exists: {}", cache_definition_.tier, ec.message());
+            spdlog::error(
+                "CacheTier::Initialize(tier={}): Failed to check if cache folder exists: {}",
+                cache_definition_.tier, ec.message()
+            );
             return std::unexpected(ec);
         }
         if (!fs::is_empty(cache_path, ec)) {
             if (ec) {
-                spdlog::error("CacheTier::Initialize(tier={}): Failed to check if cache folder is empty: {}", cache_definition_.tier, ec.message());
+                spdlog::error(
+                    "CacheTier::Initialize(tier={}): Failed to check if cache folder is empty: {}",
+                    cache_definition_.tier, ec.message()
+                );
                 return std::unexpected(ec);
             }
-            spdlog::error("CacheTier::Initialize(tier={}): Cache folder is not empty. Aborting initialization.", cache_definition_.tier);
+            spdlog::error(
+                "CacheTier::Initialize(tier={}): Cache folder is not empty. Aborting "
+                "initialization.",
+                cache_definition_.tier
+            );
             return std::unexpected(make_error_code(StorageErrc::NotEmpty));
         }
     }
@@ -376,19 +376,27 @@ StorageResult<void> CacheTier::Shutdown()
     fs::path cache_path = cache_definition_.storage_definition.path;
     if (!fs::exists(cache_path, ec)) {
         if (ec) {
-            spdlog::error("CacheTier::Shutdown(tier={}): Failed to check if cache folder exists: {}", cache_definition_.tier, ec.message());
+            spdlog::error(
+                "CacheTier::Shutdown(tier={}): Failed to check if cache folder exists: {}",
+                cache_definition_.tier, ec.message()
+            );
             return std::unexpected(ec);
         }
-        spdlog::error("CacheTier::Shutdown(tier={}): Cache folder does not exist. Aborting shutdown.", cache_definition_.tier);
+        spdlog::error(
+            "CacheTier::Shutdown(tier={}): Cache folder does not exist. Aborting shutdown.",
+            cache_definition_.tier
+        );
         return std::unexpected(make_error_code(StorageErrc::FileNotFound));
     }
     // Clear all folder/files in the cache folder
     fs::remove_all(cache_path, ec);
     if (ec) {
-        spdlog::error("CacheTier::Shutdown(tier={}): Failed to clear cache folder: {}", cache_definition_.tier, ec.message());
+        spdlog::error(
+            "CacheTier::Shutdown(tier={}): Failed to clear cache folder: {}",
+            cache_definition_.tier, ec.message()
+        );
         return std::unexpected(ec);
     }
-
 
     auto result = storage_instance_->Shutdown();
     if (result)
@@ -423,11 +431,17 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path &fuse_path
 
     auto it = item_metadatas_.find(fuse_path);
     if (it == item_metadatas_.end()) {
-        spdlog::warn("CacheTier::InvalidateAndRemoveItem: Item {} not found in metadata.", fuse_path.string());
+        spdlog::warn(
+            "CacheTier::InvalidateAndRemoveItem: Item {} not found in metadata.", fuse_path.string()
+        );
         // Attempt to remove from storage anyway, as it might be an orphaned file
         auto remove_res = storage_instance_->Remove(fuse_path);
         if (!remove_res) {
-            spdlog::error("CacheTier::InvalidateAndRemoveItem: Failed to remove orphaned item {} from storage: {}", fuse_path.string(), remove_res.error().message());
+            spdlog::error(
+                "CacheTier::InvalidateAndRemoveItem: Failed to remove orphaned item {} from "
+                "storage: {}",
+                fuse_path.string(), remove_res.error().message()
+            );
             return std::unexpected(remove_res.error());
         }
         return {};
@@ -438,15 +452,20 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path &fuse_path
 
     auto remove_res = storage_instance_->Remove(fuse_path);
     if (!remove_res) {
-        spdlog::error("CacheTier::InvalidateAndRemoveItem: Failed to remove item {} from storage: {}", fuse_path.string(), remove_res.error().message());
+        spdlog::error(
+            "CacheTier::InvalidateAndRemoveItem: Failed to remove item {} from storage: {}",
+            fuse_path.string(), remove_res.error().message()
+        );
         // TODO: Re-insert metadata or handle inconsistency.
         return std::unexpected(remove_res.error());
     }
 
-    stats_.DecrementSizeBytes(item_size);
-    spdlog::trace("CacheTier::InvalidateAndRemoveItem: Item {} ({} bytes) removed. New used space: {} bytes.", fuse_path.string(), item_size, stats_.GetCurrentSizeBytes());
+    spdlog::trace(
+        "CacheTier::InvalidateAndRemoveItem: Item {} ({} bytes) removed.", fuse_path.string(),
+        item_size
+    );
 
-    return {}; // Success
+    return {};  // Success
 }
 StorageResult<const ItemMetadata> CacheTier::GetItemMetadata(const fs::path &fuse_path)
 {
@@ -493,8 +512,8 @@ StorageResult<void> CacheTier::InsertItemMetadata(const ItemMetadata &item_metad
     return {};
 }
 StorageResult<bool> CacheTier::CacheItemIfWorthIt(
-    const fs::path& fuse_path, off_t offset, std::span<std::byte>& data,
-    const ItemMetadata& item_metadata
+    const fs::path &fuse_path, off_t offset, std::span<std::byte> &data,
+    const ItemMetadata &item_metadata
 )
 {
     std::lock_guard lock(cache_mutex_);
@@ -575,7 +594,6 @@ StorageResult<void> CacheTier::CacheItemForcibly(
         }
     }
     item_metadatas_.insert(item_metadata);
-    stats_.IncrementSizeBytes(item_metadata.coherency_metadata.size_bytes);
     spdlog::trace("CacheTier::CacheItemForcibly(tier={}) -> Success", cache_definition_.tier);
     return {};
 }
@@ -628,7 +646,7 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) co
         item.coherency_metadata.size_bytes
     );
 
-    auto avail_res = storage_instance_->GetAvailableBytes();
+    auto avail_res = GetAvailableBytes();
     if (!avail_res)
         return std::unexpected(avail_res.error());
     size_t avail = *avail_res;
@@ -665,7 +683,7 @@ StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
     spdlog::debug("CacheTier::FreeUpSpace({})", required_space);
     std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
 
-    auto avail_res = storage_instance_->GetAvailableBytes();
+    auto avail_res = GetAvailableBytes();
     if (!avail_res)
         return std::unexpected(avail_res.error());
     if (*avail_res >= required_space)
@@ -684,15 +702,17 @@ StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
         // remove backing file (still under lock → no one else touches it)
         auto rm_res = storage_instance_->Remove(victim);
         if (!rm_res) {
-            spdlog::error("CacheTier::FreeUpSpace: Failed to remove item '{}': {}", victim.string(), rm_res.error().message());
+            spdlog::error(
+                "CacheTier::FreeUpSpace: Failed to remove item '{}': {}", victim.string(),
+                rm_res.error().message()
+            );
             return std::unexpected(rm_res.error());
         }
-        
+
         reclaimed += vsize;
-        stats_.DecrementSizeBytes(vsize);
     }
 
-    auto new_avail_res = storage_instance_->GetAvailableBytes();
+    auto new_avail_res = GetAvailableBytes();
     if (!new_avail_res || *new_avail_res < required_space)
         return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
 

@@ -23,7 +23,7 @@ namespace DistributedCacheFS::Cache
 using namespace Storage;
 using namespace Config;
 
-CacheManager::CacheManager(Config::NodeConfig& config, std::shared_ptr<IStorage> origin)
+CacheManager::CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin)
     : config_(config), origin_(std::move(origin))
 {
     spdlog::debug("CacheManager::CacheManager()");
@@ -516,6 +516,11 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
     if (!tier)
         return bytes_for_caller;
 
+    // Free up space in the tier
+    auto free_up_space_res = tier->FreeUpSpace(origin_size);
+    if (!free_up_space_res)
+        return std::unexpected(free_up_space_res.error());
+
     // Stream from origin to tier in 1‑MiB blocks to avoid giant vec
     constexpr std::size_t kBlk = 1 << 20;
     std::vector<std::byte> blk(kBlk);
@@ -530,7 +535,7 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
         if (*r == 0)
             break;
         std::span<std::byte> cblk{blk.data(), *r};
-        auto w = tier->Write(fuse_path, static_cast<off_t>(total_read), cblk);
+        auto w = tier->storage_instance_->Write(fuse_path, static_cast<off_t>(total_read), cblk);
         if (!w || *w != *r)
             return std::unexpected(make_error_code(StorageErrc::IOError));
         total_read += *r;
@@ -648,7 +653,7 @@ StorageResult<void> CacheManager::TryPromoteItem(fs::path& fuse_path)
 
     std::vector<std::byte> buf(meta.coherency_metadata.size_bytes);
     std::span<std::byte> span{buf};
-    auto read_res = current_tier->Read(fuse_path, 0, span);
+    auto read_res = current_tier->storage_instance_->Read(fuse_path, 0, span);
     if (!read_res || *read_res != span.size())
         return std::unexpected(read_res ? make_error_code(StorageErrc::IOError) : read_res.error());
 

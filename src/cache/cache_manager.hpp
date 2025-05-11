@@ -46,7 +46,7 @@ class CacheManager
     //------------------------------------------------------------------------------//
     // Class Creation and Destruction
     //------------------------------------------------------------------------------//
-    explicit CacheManager(Config::NodeConfig& config, std::shared_ptr<IStorage> origin);
+    explicit CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin);
     ~CacheManager();
 
     CacheManager(const CacheManager&)            = delete;
