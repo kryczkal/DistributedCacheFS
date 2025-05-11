@@ -165,7 +165,7 @@ StorageResult<size_t> CacheManager::ReadFile(
 )
 {
     spdlog::debug("CacheManager::ReadFile({}, {}, {})", fuse_path.string(), offset, buffer.size());
-    if (fuse_path.empty() || fuse_path == "/")
+    if (fuse_path.empty() || fuse_path == ".")
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
 
     // fast path : cached hit
@@ -200,7 +200,7 @@ StorageResult<size_t> CacheManager::WriteFile(
 )
 {
     spdlog::debug("CacheManager::WriteFile({}, {}, {})", fuse_path.string(), offset, data.size());
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty() || fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -240,7 +240,7 @@ StorageResult<size_t> CacheManager::WriteFile(
 StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, mode_t mode)
 {
     spdlog::debug("CacheManager::CreateFile({}, {:o})", fuse_path.string(), mode);
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty() || fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -275,7 +275,7 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
 StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_path, mode_t mode)
 {
     spdlog::debug("CacheManager::CreateDirectory({}, {:o})", fuse_path.string(), mode);
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty() || fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -310,7 +310,7 @@ StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_pa
 StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 {
     spdlog::debug("CacheManager::Remove({})", fuse_path.string());
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty() || fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -346,7 +346,7 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path, off_t size)
 {
     spdlog::debug("CacheManager::TruncateFile({}, {})", fuse_path.string(), size);
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty() || fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     if (size < 0) {
@@ -386,8 +386,8 @@ StorageResult<void> CacheManager::Move(
 )
 {
     spdlog::debug("CacheManager::Move({}, {})", from_fuse_path.string(), to_fuse_path.string());
-    if (from_fuse_path.empty() || to_fuse_path.empty() || from_fuse_path == "/" ||
-        to_fuse_path == "/") {
+    if (from_fuse_path.empty() || from_fuse_path == "." || to_fuse_path.empty() ||
+        to_fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -456,7 +456,7 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
     );
     if (offset < 0)
         return std::unexpected(make_error_code(StorageErrc::InvalidOffset));
-    if (fuse_path.empty() || fuse_path == "/") {
+    if (fuse_path.empty() || fuse_path == ".") {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
