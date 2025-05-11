@@ -146,14 +146,7 @@ int main(int argc, char *argv[])
 
     spdlog::info("Shutting down components and cleaning up resources...");
 
-    if (cache_coordinator) {
-        auto shutdown_res = cache_coordinator->ShutdownAll();
-        if (!shutdown_res) {
-            spdlog::error(
-                "Error shutting down cache coordinator: {}", shutdown_res.error().message()
-            );
-        }
-    }
+    context_ptr.reset(); // Cleanup
 
     spdlog::info("{} exiting...", DistributedCacheFS::Constants::APP_NAME);
     spdlog::shutdown();
