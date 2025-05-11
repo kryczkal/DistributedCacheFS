@@ -496,8 +496,8 @@ StorageResult<std::size_t> LocalStorage::Write(
     }
 
     // Capacity guard – reject if the growth would exceed max_size_bytes_
-    const off_t new_size   = std::max<off_t>(old_size, offset + static_cast<off_t>(data.size()));
-    const uint64_t growth  = (new_size > old_size) ? static_cast<uint64_t>(new_size - old_size) : 0;
+    const off_t new_size  = std::max<off_t>(old_size, offset + static_cast<off_t>(data.size()));
+    const uint64_t growth = (new_size > old_size) ? static_cast<uint64_t>(new_size - old_size) : 0;
 
     if (stats_.UsesSizeTracking() && growth > 0) {
         auto avail_res = GetAvailableBytes();
@@ -506,8 +506,8 @@ StorageResult<std::size_t> LocalStorage::Write(
         }
         if (growth > *avail_res) {
             spdlog::warn(
-                "LocalStorage::Write: Out of space – need {} bytes, only {} bytes left.",
-                growth, *avail_res
+                "LocalStorage::Write: Out of space – need {} bytes, only {} bytes left.", growth,
+                *avail_res
             );
             return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
         }
@@ -670,8 +670,8 @@ StorageResult<void> LocalStorage::Truncate(const std::filesystem::path& relative
         }
         if (growth > *avail_res) {
             spdlog::warn(
-                "LocalStorage::Truncate: Out of space – need {} bytes, only {} bytes left.",
-                growth, *avail_res
+                "LocalStorage::Truncate: Out of space – need {} bytes, only {} bytes left.", growth,
+                *avail_res
             );
             return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
         }

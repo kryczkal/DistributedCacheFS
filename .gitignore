@@ -3,6 +3,7 @@ build/
 dist/
 .idea/
 .vscode/
+.cache/
 
 .clang-format
 .clang-tidy
