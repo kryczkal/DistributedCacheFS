@@ -343,7 +343,7 @@ StorageResult<void> LocalStorage::Shutdown()
 StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    spdlog::debug("LocalStorage::GetCapacityBytes()");
+    spdlog::trace("LocalStorage::GetCapacityBytes()");
     std::error_code ec;
     fs::space_info space = fs::space(base_path_, ec);
     if (ec) {
@@ -367,7 +367,7 @@ StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
 StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    spdlog::debug("LocalStorage::GetUsedBytes()");
+    spdlog::trace("LocalStorage::GetUsedBytes()");
 
     // TODO: Implement accurate tracking of used bytes.
     // This currently estimates based on capacity - available from fs::space_info,
@@ -412,7 +412,7 @@ StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
 StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    spdlog::debug("LocalStorage::GetAvailableBytes()");
+    spdlog::trace("LocalStorage::GetAvailableBytes()");
     std::error_code ec;
     fs::space_info space = fs::space(base_path_, ec);  // Actual free space on the physical device
     if (ec) {
@@ -446,10 +446,14 @@ StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
         } else {
             available_within_defined_limit = defined_capacity - current_managed_used_bytes;
         }
+        spdlog::trace(
+            "LocalStorage::GetAvailableBytes -> {} (defined limit) vs {} (actual)",
+            available_within_defined_limit, actual_filesystem_free_space
+        );
         result = std::min(available_within_defined_limit, actual_filesystem_free_space);
-    } else {
-        result = actual_filesystem_free_space;
+        return result;
     }
+    result = actual_filesystem_free_space;
     spdlog::trace("LocalStorage::GetAvailableBytes -> {}", result);
     return result;
 }

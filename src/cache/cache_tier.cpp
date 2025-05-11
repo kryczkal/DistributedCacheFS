@@ -581,9 +581,17 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) co
         would_free += it->coherency_metadata.size_bytes;
         heat_tally += it->heat_metadata.heat;
         if (heat_tally > item.heat_metadata.heat) {
+            spdlog::trace(
+                "CacheTier::IsItemWorthInserting -> false: Evicted items are hotter than candidate"
+            );
             return false;  // too expensive to evict
         }
     }
+    if (would_free < item.coherency_metadata.size_bytes) {
+        spdlog::trace("CacheTier::IsItemWorthInserting -> false: Not enough space to evict");
+        return false;
+    }
+    spdlog::trace("CacheTier::IsItemWorthInserting -> true: Enough space to evict");
     return true;
 }
 StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
