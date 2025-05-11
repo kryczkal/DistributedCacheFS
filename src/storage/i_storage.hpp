@@ -21,6 +21,8 @@
 namespace DistributedCacheFS::Storage
 {
 
+namespace fs = std::filesystem;
+
 // Interface for a Cache Storage Tier
 class IStorage
 {
@@ -75,9 +77,12 @@ class IStorage
     ) = 0;
 
     virtual StorageResult<void> Move(
-        const std::filesystem::path& from_relative_path,
-        const std::filesystem::path& to_relative_path
+        const fs::path& from_relative_path, const fs::path& to_relative_path
     ) = 0;
+
+    virtual StorageResult<void> SetPermissions(const fs::path& relative_path, mode_t mode) = 0;
+
+    virtual StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) = 0;
 
     // Initialization / Shutdown
     virtual StorageResult<void> Initialize() = 0;

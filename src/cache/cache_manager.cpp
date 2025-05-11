@@ -468,6 +468,100 @@ StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_pa
     return origin_statvfs;
 }
 
+StorageResult<void> CacheManager::SetPermissions(const fs::path& fuse_path, mode_t mode)
+{
+    spdlog::debug("CacheManager::SetPermissions({}, {:o})", fuse_path.string(), mode);
+    if (fuse_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    // Change permissions on origin
+    auto origin_res = origin_->SetPermissions(fuse_path, mode);
+    if (!origin_res) {
+        spdlog::error(
+            "CacheManager::SetPermissions: Origin SetPermissions failed for {}: {}",
+            fuse_path.string(), origin_res.error().message()
+        );
+        return std::unexpected(origin_res.error());
+    }
+
+    // Invalidate cache entry if it exists
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock meta_rlock(metadata_mutex_);  // Read lock to find
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+
+    if (cache_tier) {
+        spdlog::trace(
+            "CacheManager::SetPermissions: Invalidating cache for {} on tier {}",
+            fuse_path.string(), cache_tier->GetTier()
+        );
+        // RemoveMetadataInvalidateCache acquires its own write lock on metadata_mutex_
+        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!invalidation_res) {
+            spdlog::warn(
+                "CacheManager::SetPermissions: Failed to invalidate cache entry for {}: {}. "
+                "Proceeding, but cache might be stale.",
+                fuse_path.string(), invalidation_res.error().message()
+            );
+        }
+    }
+
+    spdlog::trace("CacheManager::SetPermissions -> Success for {}", fuse_path.string());
+    return {};
+}
+
+StorageResult<void> CacheManager::SetOwner(const fs::path& fuse_path, uid_t uid, gid_t gid)
+{
+    spdlog::debug("CacheManager::SetOwner({}, uid={}, gid={})", fuse_path.string(), uid, gid);
+    if (fuse_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    // Change owner on origin
+    auto origin_res = origin_->SetOwner(fuse_path, uid, gid);
+    if (!origin_res) {
+        spdlog::error(
+            "CacheManager::SetOwner: Origin SetOwner failed for {}: {}", fuse_path.string(),
+            origin_res.error().message()
+        );
+        return std::unexpected(origin_res.error());
+    }
+
+    // Invalidate cache entry if it exists
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock meta_rlock(metadata_mutex_);  // Read lock to find
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+
+    if (cache_tier) {
+        spdlog::trace(
+            "CacheManager::SetOwner: Invalidating cache for {} on tier {}", fuse_path.string(),
+            cache_tier->GetTier()
+        );
+        // RemoveMetadataInvalidateCache acquires its own write lock on metadata_mutex_
+        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!invalidation_res) {
+            spdlog::warn(
+                "CacheManager::SetOwner: Failed to invalidate cache entry for {}: {}. "
+                "Proceeding, but cache might be stale.",
+                fuse_path.string(), invalidation_res.error().message()
+            );
+        }
+    }
+
+    spdlog::trace("CacheManager::SetOwner -> Success for {}", fuse_path.string());
+    return {};
+}
+
 // Private Cache Logic Helper Implementations
 
 StorageResult<size_t> CacheManager::FetchAndTryCache(

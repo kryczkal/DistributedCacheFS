@@ -9,6 +9,7 @@
 #include "storage/storage_error.hpp"
 
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
@@ -20,7 +21,7 @@ namespace DistributedCacheFS::FuseOps
 
 namespace fs = std::filesystem;
 
-// Helper to get coordinator
+// Helper to get manager
 inline Cache::CacheManager *get_coordinator()
 {
     FileSystemContext *ctx = get_context();
@@ -57,6 +58,75 @@ inline fs::path get_fuse_path(const char *path)
     return fuse_path;
 }
 
+// Basic permission check helper, POSIX-like.
+// access_mask is a bit-OR of R_OK|W_OK|X_OK (same semantics as access(2))
+int permission_check_helper(uid_t file_uid, gid_t file_gid, mode_t file_mode, int access_mask)
+{
+    struct fuse_context *ctx = fuse_get_context();
+    if (!ctx) {
+        spdlog::error("permission_check_helper: missing FUSE context");
+        return -EIO;
+    }
+
+    const uid_t caller_uid = ctx->uid;
+    const gid_t caller_gid = ctx->gid;
+
+    // Root bypass – POSIX: root may ignore mode bits *except* execute on
+    // non-regular files; most filesystems grant everything – we follow that.
+    if (caller_uid == 0) {
+        if ((access_mask & X_OK) && !S_ISDIR(file_mode) &&
+            !(file_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+            return -EACCES;  // classic root-needs-x corner-case
+        }
+        return 0;
+    }
+
+    // Build the “available permission mask” for THIS caller
+    mode_t avail = 0;
+
+    // owner?
+    if (caller_uid == file_uid) {
+        avail = file_mode & S_IRWXU;
+    } else {
+        // collect caller’s groups (primary + supplementary)
+        bool in_group = (caller_gid == file_gid);
+        if (!in_group) {
+            int ngroups = getgroups(0, nullptr);
+            if (ngroups > 0) {
+                std::vector<gid_t> groups(ngroups);
+                if (getgroups(ngroups, groups.data()) == ngroups) {
+                    in_group = std::find(groups.begin(), groups.end(), file_gid) != groups.end();
+                }
+            }
+        }
+        if (in_group) {
+            avail = file_mode & S_IRWXG;
+        } else {
+            avail = file_mode & S_IRWXO;
+        }
+    }
+
+    // Translate caller’s requested mask into mode bits
+    mode_t need = 0;
+    if (access_mask & R_OK)
+        need |= S_IRUSR;
+    if (access_mask & W_OK)
+        need |= S_IWUSR;
+    if (access_mask & X_OK)
+        need |= S_IXUSR;
+
+    // shift need so that USER bits align with the level we are checking
+    if (avail == (file_mode & S_IRWXG))
+        need >>= 3;
+    else if (avail == (file_mode & S_IRWXO))
+        need >>= 6;
+
+    if ((avail & need) == need) {
+        return 0;  // success
+    }
+    return -EACCES;
+}
+
 // FUSE Operation Implementations
 
 int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/)
@@ -64,13 +134,13 @@ int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/
     spdlog::debug("FUSE: getattr({})", path);
     memset(stbuf, 0, sizeof(struct stat));
 
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator) {
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager) {
         return -EIO;
     }
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->GetAttributes(fuse_path);
+    auto result    = manager->GetAttributes(fuse_path);
 
     if (result.has_value()) {
         *stbuf          = result.value();
@@ -90,15 +160,15 @@ int readdir(
 )
 {
     spdlog::debug("FUSE: readdir({})", path);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     filler(buf, ".", nullptr, 0, (fuse_fill_dir_flags)0);
     filler(buf, "..", nullptr, 0, (fuse_fill_dir_flags)0);
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto list_res  = coordinator->ListDirectory(fuse_path);
+    auto list_res  = manager->ListDirectory(fuse_path);
 
     if (!list_res) {
         return Storage::StorageResultToErrno(list_res);
@@ -125,8 +195,8 @@ int readlink(const char *path, char *linkbuf, size_t size)
 int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
 {
     spdlog::trace("FUSE mknod called for path: {}, mode={:o}", path, mode);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     if (!S_ISREG(mode)) {
@@ -135,44 +205,44 @@ int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
     }
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->CreateFile(fuse_path, mode);
+    auto result    = manager->CreateFile(fuse_path, mode);
     return Storage::StorageResultToErrno(result);
 }
 
 int mkdir(const char *path, mode_t mode)
 {
     spdlog::debug("FUSE mkdir called for path: {}, mode={:o}", path, mode);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->CreateDirectory(fuse_path, mode);
+    auto result    = manager->CreateDirectory(fuse_path, mode);
     return Storage::StorageResultToErrno(result);
 }
 
 int unlink(const char *path)
 {
     spdlog::debug("FUSE unlink called for path: {}", path);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     // Assuming unlink is for files
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->Remove(fuse_path);
+    auto result    = manager->Remove(fuse_path);
     return Storage::StorageResultToErrno(result);
 }
 
 int rmdir(const char *path)
 {
     spdlog::debug("FUSE rmdir called for path: {}", path);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->Remove(fuse_path);
+    auto result    = manager->Remove(fuse_path);
     return Storage::StorageResultToErrno(result);
 }
 
@@ -187,8 +257,8 @@ int symlink(const char *target, const char *linkpath)
 int rename(const char *from_path, const char *to_path, unsigned int flags)
 {
     spdlog::debug("FUSE rename called for: {} -> {}", from_path, to_path);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     // TODO: Check flags
@@ -198,7 +268,7 @@ int rename(const char *from_path, const char *to_path, unsigned int flags)
 
     auto from_fuse_path = FuseOps::get_fuse_path(from_path);
     auto to_fuse_path   = FuseOps::get_fuse_path(to_path);
-    auto result         = coordinator->Move(from_fuse_path, to_fuse_path);
+    auto result         = manager->Move(from_fuse_path, to_fuse_path);
     return Storage::StorageResultToErrno(result);
 }
 
@@ -211,122 +281,119 @@ int link(const char *oldpath, const char *newpath)
 int chmod(const char *path, mode_t mode, struct fuse_file_info * /*fi*/)
 {
     spdlog::debug("FUSE chmod called for path: {}, mode={:o}", path, mode);
-    // TODO: Implement in CacheCoordinator and Origin
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
 
-    spdlog::warn("FUSE chmod called, but currently not implemented.");
-    return -ENOSYS;
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    // Keep only permission bits, not file type
+    mode_t permission_mode = mode & (S_IRWXU | S_IRWXG | S_IRWXO | S_ISUID | S_ISGID | S_ISVTX);
+
+    auto result = manager->SetPermissions(fuse_path, permission_mode);
+    return Storage::StorageResultToErrno(result);
 }
 
 int chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info * /*fi*/)
 {
     spdlog::debug("FUSE chown called for path: {}, uid={}, gid={}", path, uid, gid);
-    // TODO: Implement in CacheCoordinator and Origin
-    spdlog::warn("FUSE chown called, but currently not implemented.");
-    return -ENOSYS;
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    // FUSE passes -1 if uid/gid is not to be changed. chown syscall expects this.
+    auto result = manager->SetOwner(fuse_path, uid, gid);
+    return Storage::StorageResultToErrno(result);
 }
 
 int truncate(const char *path, off_t size, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE truncate called for path: {}, size={}", path, size);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->TruncateFile(fuse_path, size);
+    auto result    = manager->TruncateFile(fuse_path, size);
     return Storage::StorageResultToErrno(result);
 }
 
 int open(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE open called for path: {}", path);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator) {
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
-    }
 
-    int flags = fi->flags;
+    const int oflags = fi->flags;
+    auto fuse_path   = FuseOps::get_fuse_path(path);
 
-    auto fuse_path                = FuseOps::get_fuse_path(path);
-    auto attr_res                 = coordinator->GetAttributes(fuse_path);
-    int attr_errno                = Storage::StorageResultToErrno(attr_res);
-    bool file_existed_before_open = (attr_errno == 0);
-
-    if (!file_existed_before_open && (flags & O_CREAT)) {
-        // File doesn't exist, and O_CREAT is set: Try to create it.
-        if (attr_errno != -ENOENT) {
-            spdlog::debug(
-                "FUSE open: GetAttributes failed unexpectedly for non-existent path {}: {}", path,
-                attr_errno
-            );
-            return attr_errno;
-        }
-
-        spdlog::trace("FUSE open: O_CREAT requested, path {} does not exist. Creating...", path);
-        // Use default mode, FUSE/kernel usually handles umask.
+    // O_CREAT handling
+    if (oflags & O_CREAT) {
+        // Fast path: try to create; we ignore EEXIST here and handle later.
         mode_t create_mode = 0644;
-        auto create_res    = coordinator->CreateFile(fuse_path, create_mode);
-        int create_errno   = Storage::StorageResultToErrno(create_res);
-
-        if (create_errno != 0) {
-            spdlog::error("FUSE open: O_CREAT failed to create file {}: {}", path, create_errno);
-            return create_errno;
-        }
-        spdlog::trace("FUSE open: O_CREAT successfully created file {}", path);
-
-    } else if (file_existed_before_open && (flags & O_CREAT) && (flags & O_EXCL)) {
-        spdlog::debug("FUSE open: O_CREAT|O_EXCL failed, path {} already exists.", path);
-        return -EEXIST;
-    } else if (!file_existed_before_open && !(flags & O_CREAT)) {
-        spdlog::debug("FUSE open: Path {} does not exist and O_CREAT not specified.", path);
-        return -ENOENT;
-    } else if (attr_errno != 0 && file_existed_before_open) {
-        spdlog::error("FUSE open: GetAttributes failed for existing path {}: {}", path, attr_errno);
-        return attr_errno;
+        (void)manager->CreateFile(fuse_path, create_mode);  // ignore result for now
     }
-    const struct stat &stbuf = attr_res.value();
 
-    // Check if opening a directory when not allowed (e.g., O_WRONLY)
-    if (S_ISDIR(stbuf.st_mode) && (flags & O_ACCMODE) != O_RDONLY) {
-        spdlog::debug("FUSE open: Attempt to open directory {} with write flags.", path);
+    // stat the (possibly-new) object
+    auto attr_res = manager->GetAttributes(fuse_path);
+    if (!attr_res) {
+        int err = Storage::StorageResultToErrno(attr_res);
+        if ((oflags & O_CREAT) && (oflags & O_EXCL) && err == -ENOENT)
+            return -EIO;  // create failed mysteriously
+        return err;
+    }
+    const struct stat &st = attr_res.value();
+
+    // exclusivity check
+    if ((oflags & O_CREAT) && (oflags & O_EXCL))
+        return -EEXIST;  // file now exists
+
+    // permission checks
+    int req = 0;
+    switch (oflags & O_ACCMODE) {
+        case O_RDONLY:
+            req = R_OK;
+            break;
+        case O_WRONLY:
+            req = W_OK;
+            break;
+        case O_RDWR:
+            req = R_OK | W_OK;
+            break;
+    }
+    if (S_ISDIR(st.st_mode))
+        req |= X_OK;  // need search permission
+
+    if (int p = permission_check_helper(st.st_uid, st.st_gid, st.st_mode, req); p != 0)
+        return p;
+
+    // O_TRUNC for regular files
+    if ((oflags & O_TRUNC) && S_ISREG(st.st_mode) && (oflags & O_ACCMODE) != O_RDONLY) {
+        auto trunc_res = manager->TruncateFile(fuse_path, 0);
+        if (!trunc_res)
+            return Storage::StorageResultToErrno(trunc_res);
+    }
+
+    // Reject writing a directory (unless O_PATH)
+    if (S_ISDIR(st.st_mode) && ((oflags & O_ACCMODE) != O_RDONLY) && !(oflags & O_PATH))
         return -EISDIR;
-    }
 
-    // TODO: Implement permission checks based on flags and file mode
-
-    if ((flags & O_TRUNC) && S_ISREG(stbuf.st_mode)) {
-        // O_TRUNC: Truncate file to zero length if opening for writing
-        if ((flags & O_ACCMODE) != O_RDONLY) {
-            spdlog::trace("FUSE open: O_TRUNC requested for path {}.", path);
-            auto trunc_res  = coordinator->TruncateFile(fuse_path, 0);
-            int trunc_errno = Storage::StorageResultToErrno(trunc_res);
-            if (trunc_errno != 0) {
-                spdlog::warn("FUSE open: O_TRUNC failed for path {}: {}", path, trunc_errno);
-                return trunc_errno;
-            }
-        } else {
-            spdlog::warn("FUSE open: O_TRUNC requested but file not opened for writing.");
-            return -EACCES;
-        }
-    }
-
-    fi->keep_cache = 1;  // Keep cache for this file
-
-    spdlog::trace("FUSE open successful for path: {}", path);
+    fi->keep_cache = 1;
     return 0;
 }
 
 int read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE read called for path: {}, size={}, offset={}", path, size, offset);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     std::span<std::byte> buffer_span{reinterpret_cast<std::byte *>(buf), size};
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->ReadFile(fuse_path, offset, buffer_span);
+    auto result    = manager->ReadFile(fuse_path, offset, buffer_span);
 
     if (!result) {
         return Storage::StorageResultToErrno(result);
@@ -340,14 +407,14 @@ int write(
 )
 {
     spdlog::trace("FUSE write called for path: {}, size={}, offset={}", path, size, offset);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
     std::span<std::byte> data_span{reinterpret_cast<std::byte *>(const_cast<char *>(buf)), size};
 
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->WriteFile(fuse_path, offset, data_span);
+    auto result    = manager->WriteFile(fuse_path, offset, data_span);
 
     if (!result) {
         return Storage::StorageResultToErrno(result);
@@ -359,14 +426,14 @@ int write(
 int statfs(const char *path, struct statvfs *stbuf)
 {
     spdlog::trace("FUSE statfs called for path: {}", path);
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
 
-    // Delegate primarily to the coordinator
+    // Delegate primarily to the manager
     // Currently only supports "/", proxies to origin
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->GetFilesystemStats(fuse_path);
+    auto result    = manager->GetFilesystemStats(fuse_path);
     if (!result) {
         return Storage::StorageResultToErrno(result);
     }
@@ -408,11 +475,11 @@ int opendir(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE opendir called for {}", path);
     // Check if directory exists using GetAttributes
-    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
-    if (!coordinator)
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
         return -EIO;
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = coordinator->GetAttributes(fuse_path);
+    auto result    = manager->GetAttributes(fuse_path);
     int res_errno  = Storage::StorageResultToErrno(result);
     if (res_errno != 0)
         return res_errno;
@@ -420,7 +487,16 @@ int opendir(const char *path, struct fuse_file_info *fi)
     if (!S_ISDIR(result.value().st_mode)) {
         return -ENOTDIR;
     }
-    // TODO: Permissions check could go here
+    const struct stat &stbuf_opendir = result.value();
+    int access_res                   = FuseOps::permission_check_helper(
+        stbuf_opendir.st_uid, stbuf_opendir.st_gid, stbuf_opendir.st_mode, X_OK
+    );  // Check for execute/search permission
+    if (access_res != 0) {
+        spdlog::debug(
+            "FUSE opendir: Permission denied for path {}, mode {:#o}", path, stbuf_opendir.st_mode
+        );
+        return access_res;
+    }
     return 0;
 }
 

@@ -324,6 +324,40 @@ StorageResult<struct stat> CacheTier::GetAttributes(const std::filesystem::path 
         );
     return result;
 }
+StorageResult<void> CacheTier::SetPermissions(const fs::path &relative_path, mode_t mode)
+{
+    std::lock_guard lock(cache_mutex_);
+    spdlog::debug(
+        "CacheTier::SetPermissions(tier={}, {}, {:o})", cache_definition_.tier,
+        relative_path.string(), mode
+    );
+    auto result = storage_instance_->SetPermissions(relative_path, mode);
+    if (result)
+        spdlog::trace("CacheTier::SetPermissions(tier={}) -> Success");
+    else
+        spdlog::trace(
+            "CacheTier::SetPermissions(tier={}) -> Error: {}", cache_definition_.tier,
+            result.error().message()
+        );
+    return result;
+}
+StorageResult<void> CacheTier::SetOwner(const fs::path &relative_path, uid_t uid, gid_t gid)
+{
+    std::lock_guard lock(cache_mutex_);
+    spdlog::debug(
+        "CacheTier::SetOwner(tier={}, {}, {}, {})", cache_definition_.tier, relative_path.string(),
+        uid, gid
+    );
+    auto result = storage_instance_->SetOwner(relative_path, uid, gid);
+    if (result)
+        spdlog::trace("CacheTier::SetOwner(tier={}) -> Success");
+    else
+        spdlog::trace(
+            "CacheTier::SetOwner(tier={}) -> Error: {}", cache_definition_.tier,
+            result.error().message()
+        );
+    return result;
+}
 StorageResult<void> CacheTier::Initialize()
 {
     std::lock_guard lock(cache_mutex_);

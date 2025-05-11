@@ -165,6 +165,10 @@ class CacheTier : public Storage::IStorage
     StorageResult<bool> CheckIfFileExists(const std::filesystem::path& fuse_path) const override;
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& fuse_path) const override;
 
+    StorageResult<void> SetPermissions(const fs::path& relative_path, mode_t mode) override;
+
+    StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) override;
+
     fs::path RelativeToAbsPath(const std::filesystem::path& fuse_path) const override;
 
     //
