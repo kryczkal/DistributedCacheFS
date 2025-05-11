@@ -4,45 +4,73 @@
 #include "fuse_operations.hpp"
 // clang-format on
 
-#include "cache/cache_coordinator.hpp"
+#include "cache/cache_manager.hpp"
 #include "config/config_types.hpp"
 #include "storage/storage_error.hpp"
 
 #include <spdlog/spdlog.h>
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 namespace DistributedCacheFS::FuseOps
 {
 
+namespace fs = std::filesystem;
+
 // Helper to get coordinator
-inline Cache::CacheCoordinator *get_coordinator()
+inline Cache::CacheManager *get_coordinator()
 {
     FileSystemContext *ctx = get_context();
-    if (!ctx || !ctx->cache_coordinator) {
+    if (!ctx || !ctx->cache_manager) {
         spdlog::critical("FUSE Ops: CacheCoordinator not found in context!");
         // Cannot return error easily here, fuse expects specific context setup
         // This indicates a programming error in main.cpp
         return nullptr;
     }
-    return ctx->cache_coordinator;
+    return ctx->cache_manager.get();
+}
+
+// Helper to sanitize fuse path
+inline void sanitize_fuse_path(std::filesystem::path &fuse_path)
+{
+    spdlog::trace("FUSE: sanitize_fuse_path({})", fuse_path.string());
+    if (fuse_path.empty())
+        return;
+    if (fuse_path == "/")
+        fuse_path = fs::path(".");
+    if (fuse_path.has_root_directory())  // strip leading '/'
+        fuse_path = fuse_path.lexically_relative("/");
+}
+
+inline fs::path get_fuse_path(const char *path)
+{
+    spdlog::trace("FUSE: get_fuse_path({})", path);
+    if (!path) {
+        spdlog::error("FUSE: Invalid path provided");
+        return {};
+    }
+    fs::path fuse_path = path;
+    sanitize_fuse_path(fuse_path);
+    return fuse_path;
 }
 
 // FUSE Operation Implementations
 
 int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/)
 {
-    spdlog::trace("FUSE getattr called for path: {}", path);
+    spdlog::debug("FUSE: getattr({})", path);
     memset(stbuf, 0, sizeof(struct stat));
 
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator) {
         return -EIO;
     }
 
-    auto result = coordinator->GetAttributes(path);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->GetAttributes(fuse_path);
 
     if (result.has_value()) {
         *stbuf          = result.value();
@@ -61,15 +89,16 @@ int readdir(
     struct fuse_file_info * /*fi*/, enum fuse_readdir_flags /*flags*/
 )
 {
-    spdlog::trace("FUSE readdir called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    spdlog::debug("FUSE: readdir({})", path);
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
     filler(buf, ".", nullptr, 0, (fuse_fill_dir_flags)0);
     filler(buf, "..", nullptr, 0, (fuse_fill_dir_flags)0);
 
-    auto list_res = coordinator->ListDirectory(path);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto list_res  = coordinator->ListDirectory(fuse_path);
 
     if (!list_res) {
         return Storage::StorageResultToErrno(list_res);
@@ -96,7 +125,7 @@ int readlink(const char *path, char *linkbuf, size_t size)
 int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
 {
     spdlog::trace("FUSE mknod called for path: {}, mode={:o}", path, mode);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -105,41 +134,45 @@ int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
         return -EPERM;  // Operation not permitted for non-regular files
     }
 
-    auto result = coordinator->CreateFile(path, mode);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->CreateFile(fuse_path, mode);
     return Storage::StorageResultToErrno(result);
 }
 
 int mkdir(const char *path, mode_t mode)
 {
-    spdlog::trace("FUSE mkdir called for path: {}, mode={:o}", path, mode);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    spdlog::debug("FUSE mkdir called for path: {}, mode={:o}", path, mode);
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
-    auto result = coordinator->CreateDirectory(path, mode);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->CreateDirectory(fuse_path, mode);
     return Storage::StorageResultToErrno(result);
 }
 
 int unlink(const char *path)
 {
-    spdlog::trace("FUSE unlink called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    spdlog::debug("FUSE unlink called for path: {}", path);
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
     // Assuming unlink is for files
-    auto result = coordinator->Remove(path);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->Remove(fuse_path);
     return Storage::StorageResultToErrno(result);
 }
 
 int rmdir(const char *path)
 {
-    spdlog::trace("FUSE rmdir called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    spdlog::debug("FUSE rmdir called for path: {}", path);
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
-    auto result = coordinator->Remove(path);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->Remove(fuse_path);
     return Storage::StorageResultToErrno(result);
 }
 
@@ -153,8 +186,8 @@ int symlink(const char *target, const char *linkpath)
 
 int rename(const char *from_path, const char *to_path, unsigned int flags)
 {
-    spdlog::trace("FUSE rename called for: {} -> {}", from_path, to_path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    spdlog::debug("FUSE rename called for: {} -> {}", from_path, to_path);
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
@@ -163,7 +196,9 @@ int rename(const char *from_path, const char *to_path, unsigned int flags)
         spdlog::warn("FUSE rename flags ({}) ignored.", flags);
     }
 
-    auto result = coordinator->Move(from_path, to_path);
+    auto from_fuse_path = FuseOps::get_fuse_path(from_path);
+    auto to_fuse_path   = FuseOps::get_fuse_path(to_path);
+    auto result         = coordinator->Move(from_fuse_path, to_fuse_path);
     return Storage::StorageResultToErrno(result);
 }
 
@@ -175,7 +210,7 @@ int link(const char *oldpath, const char *newpath)
 
 int chmod(const char *path, mode_t mode, struct fuse_file_info * /*fi*/)
 {
-    spdlog::trace("FUSE chmod called for path: {}, mode={:o}", path, mode);
+    spdlog::debug("FUSE chmod called for path: {}, mode={:o}", path, mode);
     // TODO: Implement in CacheCoordinator and Origin
 
     spdlog::warn("FUSE chmod called, but currently not implemented.");
@@ -184,7 +219,7 @@ int chmod(const char *path, mode_t mode, struct fuse_file_info * /*fi*/)
 
 int chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info * /*fi*/)
 {
-    spdlog::trace("FUSE chown called for path: {}, uid={}, gid={}", path, uid, gid);
+    spdlog::debug("FUSE chown called for path: {}, uid={}, gid={}", path, uid, gid);
     // TODO: Implement in CacheCoordinator and Origin
     spdlog::warn("FUSE chown called, but currently not implemented.");
     return -ENOSYS;
@@ -193,25 +228,27 @@ int chown(const char *path, uid_t uid, gid_t gid, struct fuse_file_info * /*fi*/
 int truncate(const char *path, off_t size, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE truncate called for path: {}, size={}", path, size);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
-    auto result = coordinator->TruncateFile(path, size);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->TruncateFile(fuse_path, size);
     return Storage::StorageResultToErrno(result);
 }
 
 int open(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE open called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator) {
         return -EIO;
     }
 
     int flags = fi->flags;
 
-    auto attr_res                 = coordinator->GetAttributes(path);
+    auto fuse_path                = FuseOps::get_fuse_path(path);
+    auto attr_res                 = coordinator->GetAttributes(fuse_path);
     int attr_errno                = Storage::StorageResultToErrno(attr_res);
     bool file_existed_before_open = (attr_errno == 0);
 
@@ -228,7 +265,7 @@ int open(const char *path, struct fuse_file_info *fi)
         spdlog::trace("FUSE open: O_CREAT requested, path {} does not exist. Creating...", path);
         // Use default mode, FUSE/kernel usually handles umask.
         mode_t create_mode = 0644;
-        auto create_res    = coordinator->CreateFile(path, create_mode);
+        auto create_res    = coordinator->CreateFile(fuse_path, create_mode);
         int create_errno   = Storage::StorageResultToErrno(create_res);
 
         if (create_errno != 0) {
@@ -261,7 +298,7 @@ int open(const char *path, struct fuse_file_info *fi)
         // O_TRUNC: Truncate file to zero length if opening for writing
         if ((flags & O_ACCMODE) != O_RDONLY) {
             spdlog::trace("FUSE open: O_TRUNC requested for path {}.", path);
-            auto trunc_res  = coordinator->TruncateFile(path, 0);
+            auto trunc_res  = coordinator->TruncateFile(fuse_path, 0);
             int trunc_errno = Storage::StorageResultToErrno(trunc_res);
             if (trunc_errno != 0) {
                 spdlog::warn("FUSE open: O_TRUNC failed for path {}: {}", path, trunc_errno);
@@ -282,13 +319,14 @@ int open(const char *path, struct fuse_file_info *fi)
 int read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE read called for path: {}, size={}, offset={}", path, size, offset);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
     std::span<std::byte> buffer_span{reinterpret_cast<std::byte *>(buf), size};
 
-    auto result = coordinator->ReadFile(path, offset, buffer_span);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->ReadFile(fuse_path, offset, buffer_span);
 
     if (!result) {
         return Storage::StorageResultToErrno(result);
@@ -302,13 +340,14 @@ int write(
 )
 {
     spdlog::trace("FUSE write called for path: {}, size={}, offset={}", path, size, offset);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
-    std::span<const std::byte> data_span{reinterpret_cast<const std::byte *>(buf), size};
+    std::span<std::byte> data_span{reinterpret_cast<std::byte *>(const_cast<char *>(buf)), size};
 
-    auto result = coordinator->WriteFile(path, offset, data_span);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->WriteFile(fuse_path, offset, data_span);
 
     if (!result) {
         return Storage::StorageResultToErrno(result);
@@ -320,13 +359,14 @@ int write(
 int statfs(const char *path, struct statvfs *stbuf)
 {
     spdlog::trace("FUSE statfs called for path: {}", path);
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
 
     // Delegate primarily to the coordinator
     // Currently only supports "/", proxies to origin
-    auto result = coordinator->GetFilesystemStats(path);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->GetFilesystemStats(fuse_path);
     if (!result) {
         return Storage::StorageResultToErrno(result);
     }
@@ -368,11 +408,12 @@ int opendir(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE opendir called for {}", path);
     // Check if directory exists using GetAttributes
-    Cache::CacheCoordinator *coordinator = get_coordinator();
+    Cache::CacheManager *coordinator = FuseOps::get_coordinator();
     if (!coordinator)
         return -EIO;
-    auto result   = coordinator->GetAttributes(path);
-    int res_errno = Storage::StorageResultToErrno(result);
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = coordinator->GetAttributes(fuse_path);
+    int res_errno  = Storage::StorageResultToErrno(result);
     if (res_errno != 0)
         return res_errno;
 

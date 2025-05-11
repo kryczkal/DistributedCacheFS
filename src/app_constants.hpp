@@ -23,6 +23,10 @@ constexpr std::string_view DEFAULT_CONSOLE_LOG_PATTERN =
 constexpr std::string_view DEFAULT_MDNS_SERVICE_NAME = "_dcachefs._tcp";
 constexpr std::uint16_t DEFAULT_LISTEN_PORT          = 9876;
 
+// Filesystem
+constexpr double HEAT_REFRESH_PROBABILITY = 0.05;  // 5% of entries get passive heat refresh
+constexpr std::size_t HEAT_REFRESH_PERIOD = 128;   // run refresh after this many read hits
+
 // FUSE
 #define FUSE_USE_VERSION 31
 
