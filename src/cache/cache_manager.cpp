@@ -147,7 +147,10 @@ StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fu
         }
     }
 
-    spdlog::trace("CacheManager::GetAttributes -> Success (st_mode={:o}, st_size={})", origin_stat.st_mode, origin_stat.st_size);
+    spdlog::trace(
+        "CacheManager::GetAttributes -> Success (st_mode={:o}, st_size={})", origin_stat.st_mode,
+        origin_stat.st_size
+    );
     return origin_stat;
 }
 StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheManager::ListDirectory(
@@ -570,13 +573,16 @@ StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
                     "CacheManager::SelectCacheTierForWrite: Found cache tier {} for {}",
                     tier->GetTier(), item_metadata.path.string()
                 );
-                spdlog::trace("CacheManager::SelectCacheTierForWrite -> Selected tier {}", tier->GetTier());
+                spdlog::trace(
+                    "CacheManager::SelectCacheTierForWrite -> Selected tier {}", tier->GetTier()
+                );
                 return tier;  // first slow tier that accepts
             }
         }
     }
     spdlog::trace(
-        "CacheManager::SelectCacheTierForWrite: No suitable cache tier found for {}. Returning nullptr",
+        "CacheManager::SelectCacheTierForWrite: No suitable cache tier found for {}. Returning "
+        "nullptr",
         item_metadata.path.string()
     );
     return nullptr;  // nothing suitable
@@ -677,7 +683,10 @@ StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(const 
         );
         return std::unexpected(res.error());
     }
-    spdlog::trace("CacheManager::GetOriginCoherencyMetadata -> mtime={}, size={}", res.value().st_mtime, res.value().st_size);
+    spdlog::trace(
+        "CacheManager::GetOriginCoherencyMetadata -> mtime={}, size={}", res.value().st_mtime,
+        res.value().st_size
+    );
     return CoherencyMetadata{res.value().st_mtime, res.value().st_size};
 }
 

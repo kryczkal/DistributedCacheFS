@@ -6,9 +6,9 @@
 #include <system_error>
 #include "config_types.hpp"
 
-#include <charconv>
-#include <cctype>
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 
 #define TRY_ASSIGN(target, json_obj, key, type)                            \
     try {                                                                  \
@@ -37,7 +37,8 @@ namespace DistributedCacheFS::Config
 
 // Parses a size string (e.g., "500MB", "2GB", "1024") into bytes.
 // Returns std::nullopt if parsing fails.
-std::optional<uint64_t> ParseSizeStringToBytes(const std::string& size_str) {
+std::optional<uint64_t> ParseSizeStringToBytes(const std::string &size_str)
+{
     if (size_str.empty()) {
         return std::nullopt;
     }
@@ -60,10 +61,10 @@ std::optional<uint64_t> ParseSizeStringToBytes(const std::string& size_str) {
         unit_part += size_str[i];
         i++;
     }
-    
+
     // If there's anything left after number and unit (and optional space), it's an error
     if (i < size_str.length()) {
-         spdlog::warn("Invalid characters found after unit in size string: '{}'", size_str);
+        spdlog::warn("Invalid characters found after unit in size string: '{}'", size_str);
         return std::nullopt;
     }
 
@@ -75,34 +76,35 @@ std::optional<uint64_t> ParseSizeStringToBytes(const std::string& size_str) {
     uint64_t value;
     auto conv_res = std::from_chars(num_part.data(), num_part.data() + num_part.length(), value);
     if (conv_res.ec != std::errc() || conv_res.ptr != num_part.data() + num_part.length()) {
-         spdlog::warn("Failed to parse numeric part '{}' of size string: '{}'", num_part, size_str);
+        spdlog::warn("Failed to parse numeric part '{}' of size string: '{}'", num_part, size_str);
         return std::nullopt;
     }
 
-    if (unit_part.empty()) { // Assume bytes if no unit
+    if (unit_part.empty()) {  // Assume bytes if no unit
         return value;
     }
 
-    std::ranges::transform(unit_part, unit_part.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
+    std::ranges::transform(unit_part, unit_part.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
 
     static std::unordered_map<std::string, uint64_t> unit_multipliers = {
-        {"b", 1},
-        {"kb", 1024ULL},
-        {"k", 1024ULL},
-        {"mb", 1024ULL * 1024ULL},
-        {"m", 1024ULL * 1024ULL},
-        {"gb", 1024ULL * 1024ULL * 1024ULL},
-        {"g", 1024ULL * 1024ULL * 1024ULL},
+        { "b",                                     1},
+        {"kb",                               1024ULL},
+        { "k",                               1024ULL},
+        {"mb",                     1024ULL * 1024ULL},
+        { "m",                     1024ULL * 1024ULL},
+        {"gb",           1024ULL * 1024ULL * 1024ULL},
+        { "g",           1024ULL * 1024ULL * 1024ULL},
         {"tb", 1024ULL * 1024ULL * 1024ULL * 1024ULL},
-        {"t", 1024ULL * 1024ULL * 1024ULL * 1024ULL}
+        { "t", 1024ULL * 1024ULL * 1024ULL * 1024ULL}
     };
     auto it = unit_multipliers.find(unit_part);
     if (it != unit_multipliers.end()) {
-            value *= it->second;
+        value *= it->second;
     } else {
         spdlog::warn("Unknown size unit '{}' in string '{}'", unit_part, size_str);
-        return std::nullopt; // Unknown unit
+        return std::nullopt;  // Unknown unit
     }
     return value;
 }
@@ -283,14 +285,19 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
                     if (parsed_bytes.has_value()) {
                         tier_storage_def.min_size_bytes = parsed_bytes.value();
                     } else {
-                        spdlog::warn("Ignoring invalid 'min_size_bytes' string ('{}') for tier {}", min_size_str, cache_def.tier);
+                        spdlog::warn(
+                            "Ignoring invalid 'min_size_bytes' string ('{}') for tier {}",
+                            min_size_str, cache_def.tier
+                        );
                     }
                 } else if (item.at("min_size_bytes").is_number()) {
                     uint64_t min_b = 0;
                     TRY_ASSIGN(min_b, item, "min_size_bytes", uint64_t);
                     tier_storage_def.min_size_bytes = min_b;
                 } else {
-                    spdlog::warn("'min_size_bytes' for tier {} must be a string or a number.", cache_def.tier);
+                    spdlog::warn(
+                        "'min_size_bytes' for tier {} must be a string or a number.", cache_def.tier
+                    );
                 }
             }
             if (item.contains("max_size_bytes")) {
@@ -301,14 +308,19 @@ LoadResult loadConfigFromFile(const std::filesystem::path &file_path)
                     if (parsed_bytes.has_value()) {
                         tier_storage_def.max_size_bytes = parsed_bytes.value();
                     } else {
-                        spdlog::warn("Ignoring invalid 'max_size_bytes' string ('{}') for tier {}", max_size_str, cache_def.tier);
+                        spdlog::warn(
+                            "Ignoring invalid 'max_size_bytes' string ('{}') for tier {}",
+                            max_size_str, cache_def.tier
+                        );
                     }
                 } else if (item.at("max_size_bytes").is_number()) {
                     uint64_t max_b = 0;
                     TRY_ASSIGN(max_b, item, "max_size_bytes", uint64_t);
                     tier_storage_def.max_size_bytes = max_b;
                 } else {
-                    spdlog::warn("'max_size_bytes' for tier {} must be a string or a number.", cache_def.tier);
+                    spdlog::warn(
+                        "'max_size_bytes' for tier {} must be a string or a number.", cache_def.tier
+                    );
                 }
             }
 

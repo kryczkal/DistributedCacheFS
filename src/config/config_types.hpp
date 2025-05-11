@@ -196,7 +196,10 @@ inline bool StorageDefinition::IsValid() const
         }
         if (min_size_bytes.has_value() && max_size_bytes.has_value() &&
             *min_size_bytes > *max_size_bytes) {
-            spdlog::error("min_size_bytes ({}) cannot exceed max_size_bytes ({}) for local storage.", *min_size_bytes, *max_size_bytes);
+            spdlog::error(
+                "min_size_bytes ({}) cannot exceed max_size_bytes ({}) for local storage.",
+                *min_size_bytes, *max_size_bytes
+            );
             return false;
         }
     }

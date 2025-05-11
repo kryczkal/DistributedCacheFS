@@ -146,7 +146,7 @@ int main(int argc, char *argv[])
 
     spdlog::info("Shutting down components and cleaning up resources...");
 
-    context_ptr.reset(); // Cleanup
+    context_ptr.reset();  // Cleanup
 
     spdlog::info("{} exiting...", DistributedCacheFS::Constants::APP_NAME);
     spdlog::shutdown();
