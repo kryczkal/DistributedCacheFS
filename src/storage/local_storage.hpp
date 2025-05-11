@@ -74,6 +74,10 @@ class LocalStorage : public IStorage
         const std::filesystem::path& to_relative_path
     ) override;
 
+    StorageResult<void> SetPermissions(const fs::path& relative_path, mode_t mode) override;
+
+    StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) override;
+
     StorageResult<void> Initialize() override;
     StorageResult<void> Shutdown() override;
 

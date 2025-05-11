@@ -496,8 +496,8 @@ StorageResult<std::size_t> LocalStorage::Write(
     }
 
     // Capacity guard – reject if the growth would exceed max_size_bytes_
-    const off_t new_size   = std::max<off_t>(old_size, offset + static_cast<off_t>(data.size()));
-    const uint64_t growth  = (new_size > old_size) ? static_cast<uint64_t>(new_size - old_size) : 0;
+    const off_t new_size  = std::max<off_t>(old_size, offset + static_cast<off_t>(data.size()));
+    const uint64_t growth = (new_size > old_size) ? static_cast<uint64_t>(new_size - old_size) : 0;
 
     if (stats_.UsesSizeTracking() && growth > 0) {
         auto avail_res = GetAvailableBytes();
@@ -506,8 +506,8 @@ StorageResult<std::size_t> LocalStorage::Write(
         }
         if (growth > *avail_res) {
             spdlog::warn(
-                "LocalStorage::Write: Out of space – need {} bytes, only {} bytes left.",
-                growth, *avail_res
+                "LocalStorage::Write: Out of space – need {} bytes, only {} bytes left.", growth,
+                *avail_res
             );
             return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
         }
@@ -670,8 +670,8 @@ StorageResult<void> LocalStorage::Truncate(const std::filesystem::path& relative
         }
         if (growth > *avail_res) {
             spdlog::warn(
-                "LocalStorage::Truncate: Out of space – need {} bytes, only {} bytes left.",
-                growth, *avail_res
+                "LocalStorage::Truncate: Out of space – need {} bytes, only {} bytes left.", growth,
+                *avail_res
             );
             return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
         }
@@ -734,87 +734,94 @@ StorageResult<void> LocalStorage::CreateFile(
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::debug("LocalStorage::CreateFile({}, {:o})", relative_path.string(), mode);
+
     auto full_path = GetValidatedFullPath(relative_path);
-    if (full_path.empty()) {
-        spdlog::trace("LocalStorage::CreateFile -> InvalidPath");
+    if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-    }
-    auto parent = full_path.parent_path();
+
+    // Create parent directories if missing
     std::error_code ec;
-    std::filesystem::create_directories(parent, ec);
-    if (ec) {
+    std::filesystem::create_directories(full_path.parent_path(), ec);
+    if (ec)
         return std::unexpected(MapFilesystemError(ec, "create_file_parent"));
-    }
+
+    // Create & close empty file
     std::ofstream ofs(full_path, std::ios::binary | std::ios::trunc);
-    if (!ofs) {
+    if (!ofs)
         return std::unexpected(make_error_code(StorageErrc::IOError));
-    }
     ofs.close();
-    std::filesystem::perms perms = static_cast<std::filesystem::perms>(0);
-    if (mode & S_IRUSR)
-        perms |= std::filesystem::perms::owner_read;
-    if (mode & S_IWUSR)
-        perms |= std::filesystem::perms::owner_write;
-    if (mode & S_IRGRP)
-        perms |= std::filesystem::perms::group_read;
-    if (mode & S_IWGRP)
-        perms |= std::filesystem::perms::group_write;
-    if (mode & S_IROTH)
-        perms |= std::filesystem::perms::others_read;
-    if (mode & S_IWOTH)
-        perms |= std::filesystem::perms::others_write;
+
+    // Apply permissions incl. execute bits
+    std::filesystem::perms perms{};
+    auto add = [&](mode_t m, std::filesystem::perms p) {
+        if (mode & m)
+            perms |= p;
+    };
+    add(S_IRUSR, std::filesystem::perms::owner_read);
+    add(S_IWUSR, std::filesystem::perms::owner_write);
+    add(S_IXUSR, std::filesystem::perms::owner_exec);
+    add(S_IRGRP, std::filesystem::perms::group_read);
+    add(S_IWGRP, std::filesystem::perms::group_write);
+    add(S_IXGRP, std::filesystem::perms::group_exec);
+    add(S_IROTH, std::filesystem::perms::others_read);
+    add(S_IWOTH, std::filesystem::perms::others_write);
+    add(S_IXOTH, std::filesystem::perms::others_exec);
     std::filesystem::permissions(full_path, perms, ec);
-    if (ec) {
+    if (ec)
         return std::unexpected(MapFilesystemError(ec, "create_file_perm"));
-    }
+
+    // special bits
+    if (mode & (S_ISUID | S_ISGID | S_ISVTX))
+        if (::chmod(full_path.c_str(), mode) == -1)
+            return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+
     spdlog::trace("LocalStorage::CreateFile -> Success");
     return {};
 }
+
 StorageResult<void> LocalStorage::CreateDirectory(
     const std::filesystem::path& relative_path, mode_t mode
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::debug("LocalStorage::CreateDirectory({}, {:o})", relative_path.string(), mode);
+
     auto full_path = GetValidatedFullPath(relative_path);
-    if (full_path.empty()) {
-        spdlog::trace("LocalStorage::CreateDirectory -> InvalidPath");
+    if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-    }
+
     std::error_code ec;
-    // Create directory and all parents
-    if (!fs::create_directories(full_path, ec) && ec) {
-        spdlog::error(
-            "LocalStorage::CreateDirectory: Failed to create directory '{}': {}",
-            full_path.string(), ec.message()
-        );
+    if (!std::filesystem::create_directories(full_path, ec) && ec)
         return std::unexpected(MapFilesystemError(ec, "create_directory"));
-    }
-    // Set permissions from mode
-    std::filesystem::perms perms = static_cast<std::filesystem::perms>(0);
-    if (mode & S_IRUSR)
-        perms |= std::filesystem::perms::owner_read;
-    if (mode & S_IWUSR)
-        perms |= std::filesystem::perms::owner_write;
-    if (mode & S_IRGRP)
-        perms |= std::filesystem::perms::group_read;
-    if (mode & S_IWGRP)
-        perms |= std::filesystem::perms::group_write;
-    if (mode & S_IROTH)
-        perms |= std::filesystem::perms::others_read;
-    if (mode & S_IWOTH)
-        perms |= std::filesystem::perms::others_write;
+
+    // Set directory permissions incl. execute/search bits
+    std::filesystem::perms perms{};
+    auto add = [&](mode_t m, std::filesystem::perms p) {
+        if (mode & m)
+            perms |= p;
+    };
+    add(S_IRUSR, std::filesystem::perms::owner_read);
+    add(S_IWUSR, std::filesystem::perms::owner_write);
+    add(S_IXUSR, std::filesystem::perms::owner_exec);
+    add(S_IRGRP, std::filesystem::perms::group_read);
+    add(S_IWGRP, std::filesystem::perms::group_write);
+    add(S_IXGRP, std::filesystem::perms::group_exec);
+    add(S_IROTH, std::filesystem::perms::others_read);
+    add(S_IWOTH, std::filesystem::perms::others_write);
+    add(S_IXOTH, std::filesystem::perms::others_exec);
     std::filesystem::permissions(full_path, perms, ec);
-    if (ec) {
-        spdlog::error(
-            "LocalStorage::CreateDirectory: Failed to set permissions on '{}': {}",
-            full_path.string(), ec.message()
-        );
+    if (ec)
         return std::unexpected(MapFilesystemError(ec, "create_directory_perm"));
-    }
+
+    // sticky / setgid on directories
+    if (mode & (S_ISGID | S_ISVTX))
+        if (::chmod(full_path.c_str(), mode) == -1)
+            return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+
     spdlog::trace("LocalStorage::CreateDirectory -> Success");
     return {};
 }
+
 StorageResult<void> LocalStorage::Move(
     const std::filesystem::path& from_relative_path, const std::filesystem::path& to_relative_path
 )
@@ -916,6 +923,75 @@ StorageResult<std::vector<std::pair<std::string, struct stat>>> LocalStorage::Li
     }
     spdlog::trace("LocalStorage::ListDirectory -> {} entries", entries.size());
     return entries;
+}
+
+StorageResult<void> LocalStorage::SetPermissions(
+    const std::filesystem::path& relative_path, mode_t mode
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::SetPermissions({}, {:o})", relative_path.string(), mode);
+
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    // Convert POSIX mode → std::filesystem::perms (incl. execute bits)
+    std::filesystem::perms perms = std::filesystem::perms::none;
+    auto add                     = [&](mode_t m, std::filesystem::perms p) {
+        if (mode & m)
+            perms |= p;
+    };
+    add(S_IRUSR, std::filesystem::perms::owner_read);
+    add(S_IWUSR, std::filesystem::perms::owner_write);
+    add(S_IXUSR, std::filesystem::perms::owner_exec);
+    add(S_IRGRP, std::filesystem::perms::group_read);
+    add(S_IWGRP, std::filesystem::perms::group_write);
+    add(S_IXGRP, std::filesystem::perms::group_exec);
+    add(S_IROTH, std::filesystem::perms::others_read);
+    add(S_IWOTH, std::filesystem::perms::others_write);
+    add(S_IXOTH, std::filesystem::perms::others_exec);
+
+    std::error_code ec;
+    std::filesystem::permissions(full_path, perms, ec);
+    if (ec)
+        return std::unexpected(MapFilesystemError(ec, "chmod"));
+
+    /* Preserve special bits (set-uid, set-gid, sticky) via raw chmod */
+    if (mode & (S_ISUID | S_ISGID | S_ISVTX)) {
+        if (::chmod(full_path.c_str(), mode) == -1)
+            return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+    }
+
+    spdlog::trace("LocalStorage::SetPermissions -> Success for {}", full_path.string());
+    return {};
+}
+
+StorageResult<void> LocalStorage::SetOwner(
+    const std::filesystem::path& relative_path, uid_t uid, gid_t gid
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::SetOwner({}, {}, {})", relative_path.string(), uid, gid);
+
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        spdlog::error("LocalStorage::SetOwner: Invalid path {}", relative_path.string());
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    // -1 for uid or gid means don't change
+    if (::chown(full_path.c_str(), uid, gid) == -1) {
+        int chown_errno = errno;
+        spdlog::error(
+            "LocalStorage::SetOwner failed for path {}: {}", full_path.string(),
+            std::strerror(chown_errno)
+        );
+        return std::unexpected(make_error_code(ErrnoToStorageErrc(chown_errno)));
+    }
+
+    spdlog::trace("LocalStorage::SetOwner -> Success for {}", full_path.string());
+    return {};
 }
 
 }  // namespace DistributedCacheFS::Storage
