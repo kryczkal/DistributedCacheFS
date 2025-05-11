@@ -3,6 +3,7 @@
 
 #include "config/config_types.hpp"
 #include "storage/i_storage.hpp"
+#include "storage/storage_stats.hpp"
 
 #include <filesystem>
 #include <mutex>
@@ -10,6 +11,8 @@
 
 namespace DistributedCacheFS::Storage
 {
+
+namespace fs = std::filesystem;
 
 class LocalStorage : public IStorage
 {
@@ -104,7 +107,8 @@ class LocalStorage : public IStorage
     static const char* XATTR_ORIGIN_SIZE_KEY;
 
     const Config::StorageDefinition definition_;
-    std::filesystem::path base_path_;
+    fs::path base_path_;
+    StorageStats stats_;
     mutable std::recursive_mutex storage_mutex_;
 
     //------------------------------------------------------------------------------//

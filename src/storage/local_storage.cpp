@@ -325,7 +325,27 @@ StorageResult<void> LocalStorage::Initialize()
         spdlog::info("LocalStorage initialized using existing directory: {}", base_path_.string());
     }
 
-    // TODO: Scan existing cache contents to populate initial metadata (access_times_, used_bytes_)
+    if (definition_.max_size_bytes.has_value()) {
+        stats_.SetMaxSizeBytes(definition_.max_size_bytes.value());
+        stats_.SetUsesSizeTracking(true);
+    } else {
+        stats_.SetUsesSizeTracking(false);
+    }
+    // Scan existing cache contents to populate initial metadata (stats_)
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(base_path_)) {
+        if (entry.is_regular_file()) {
+            std::error_code ec;
+            uintmax_t file_size = entry.file_size(ec);
+            if (ec) {
+                spdlog::warn(
+                    "LocalStorage: Failed to get file size for '{}' during initial scan: {}",
+                    entry.path().string(), ec.message()
+                );
+                continue;
+            }
+            stats_.IncrementSizeBytes(file_size);
+        }
+    }
 
     spdlog::trace("LocalStorage::Initialize -> Success");
     return {};
@@ -336,6 +356,7 @@ StorageResult<void> LocalStorage::Shutdown()
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::debug("LocalStorage::Shutdown() for path: {}", base_path_.string());
     // No specific action currently needed on shutdown
+
     spdlog::trace("LocalStorage::Shutdown -> Success");
     return {};
 }
@@ -353,15 +374,12 @@ StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
         );
         return std::unexpected(MapFilesystemError(ec, "get_capacity"));
     }
-    if (definition_.max_size_bytes.has_value()) {
-        spdlog::trace(
-            "LocalStorage::GetCapacityBytes -> {}",
-            std::min(space.capacity, *definition_.max_size_bytes)
-        );
-        return std::min(space.capacity, *definition_.max_size_bytes);
+    auto capacity = space.capacity;
+    if (stats_.UsesSizeTracking()) {
+        capacity = std::min(capacity, stats_.GetMaxSizeBytes());
     }
-    spdlog::trace("LocalStorage::GetCapacityBytes -> {}", space.capacity);
-    return space.capacity;
+    spdlog::trace("LocalStorage::GetCapacityBytes -> {}", capacity);
+    return capacity;
 }
 
 StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
@@ -369,41 +387,14 @@ StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::trace("LocalStorage::GetUsedBytes()");
 
-    // TODO: Implement accurate tracking of used bytes.
-    // This currently estimates based on capacity - available from fs::space_info,
-    // which is NOT accurate if definition_.max_size_bytes is set and it's different
-    //
-    // For accurate cache eviction, this MUST return the sum of sizes of all files
-    // and directories managed by this LocalStorage instance within its base_path_.
-    //
-    // Suggested approach:
-    // 1. Add a member: `mutable std::uint64_t current_managed_size_bytes_ = 0;`
-    // 2. Add a member: `mutable bool has_scanned_initial_size_ = false;`
-    // 3. In Initialize():
-    //    - Scan base_path_ recursively.
-    //    - Sum the sizes of all files.
-    //    - Store in `current_managed_size_bytes_`.
-    //    - Set `has_scanned_initial_size_ = true;`
-    // 4. In Write(), CreateFile(), Truncate():
-    //    - Atomically update `current_managed_size_bytes_` based on the change in file size.
-    //    - Be careful with Truncate: it can increase or decrease size.
-    //    - Ensure these operations correctly report the number of bytes *actually* written/changed.
-    // 5. In Remove():
-    //    - Atomically decrement `current_managed_size_bytes_` by the size of the removed file.
-    // 6. GetUsedBytes() would then simply return `current_managed_size_bytes_`.
-    //    (after ensuring initial scan has happened).
-    //
-    // For now, using a highly simplified and potentially INACCURATE estimation for placeholder:
-    // This estimation will behave poorly if max_size_bytes is much smaller than actual disk space.
-    fs::space_info space_val = fs::space(base_path_);
-    uint64_t actual_capacity = space_val.capacity;
-    uint64_t actual_free     = space_val.free;
-    uint64_t actual_used     = actual_capacity > actual_free ? actual_capacity - actual_free : 0;
-
-    if (definition_.max_size_bytes.has_value()) {
-        uint64_t result = std::min(actual_used, *definition_.max_size_bytes);
-        spdlog::trace("LocalStorage::GetUsedBytes -> {}", result);
-        return result;
+    uint64_t actual_used = 0;
+    if (stats_.UsesSizeTracking()) {
+        actual_used = stats_.GetCurrentSizeBytes();
+    } else {
+        fs::space_info space_val = fs::space(base_path_);
+        uint64_t actual_capacity = space_val.capacity;
+        uint64_t actual_free     = space_val.free;
+        actual_used = actual_capacity > actual_free ? actual_capacity - actual_free : 0;
     }
     spdlog::trace("LocalStorage::GetUsedBytes -> {}", actual_used);
     return actual_used;
@@ -414,48 +405,26 @@ StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::trace("LocalStorage::GetAvailableBytes()");
     std::error_code ec;
-    fs::space_info space = fs::space(base_path_, ec);  // Actual free space on the physical device
-    if (ec) {
-        spdlog::error(
-            "LocalStorage::GetAvailableBytes: fs::space failed for '{}': {}", base_path_.string(),
-            ec.message()
-        );
-        return std::unexpected(MapFilesystemError(ec, "get_available"));
-    }
-
-    uint64_t actual_filesystem_free_space = space.available;
-    uint64_t result;
-
-    if (definition_.max_size_bytes.has_value()) {
-        uint64_t defined_capacity = *definition_.max_size_bytes;
-
-        // This relies on GetUsedBytes() being accurate.
-        auto used_bytes_res = GetUsedBytes();
-        if (!used_bytes_res) {
-            spdlog::error(
-                "LocalStorage::GetAvailableBytes: Failed to get used bytes: {}",
-                used_bytes_res.error().message()
-            );
-            return std::unexpected(used_bytes_res.error());
-        }
-        uint64_t current_managed_used_bytes = used_bytes_res.value();
-
-        uint64_t available_within_defined_limit;
-        if (defined_capacity <= current_managed_used_bytes) {
-            available_within_defined_limit = 0;
+    auto available = 0;
+    if (stats_.UsesSizeTracking()) {
+        if (stats_.GetCurrentSizeBytes() < stats_.GetMaxSizeBytes()) {
+            available = stats_.GetMaxSizeBytes() - stats_.GetCurrentSizeBytes();
         } else {
-            available_within_defined_limit = defined_capacity - current_managed_used_bytes;
+            available = 0;
         }
-        spdlog::trace(
-            "LocalStorage::GetAvailableBytes -> {} (defined limit) vs {} (actual)",
-            available_within_defined_limit, actual_filesystem_free_space
-        );
-        result = std::min(available_within_defined_limit, actual_filesystem_free_space);
-        return result;
+    } else {
+        fs::space_info space = fs::space(base_path_, ec);
+        if (ec) {
+            spdlog::error(
+                "LocalStorage::GetAvailableBytes: fs::space failed for '{}': {}",
+                base_path_.string(), ec.message()
+            );
+            return std::unexpected(MapFilesystemError(ec, "get_available"));
+        }
+        available = space.available;
     }
-    result = actual_filesystem_free_space;
-    spdlog::trace("LocalStorage::GetAvailableBytes -> {}", result);
-    return result;
+    spdlog::trace("LocalStorage::GetAvailableBytes -> {}", available);
+    return available;
 }
 
 StorageResult<std::size_t> LocalStorage::Read(
@@ -511,32 +480,52 @@ StorageResult<std::size_t> LocalStorage::Write(
     spdlog::debug(
         "LocalStorage::Write({}, {}, data_size={})", relative_path.string(), offset, data.size()
     );
-    auto full_path = GetValidatedFullPath(relative_path);
+
+    const auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     if (offset < 0)
         return std::unexpected(make_error_code(StorageErrc::InvalidOffset));
 
-    auto parent_path = full_path.parent_path();
+    // Determine file size before the write-operation
+    off_t old_size = 0;
+    if (stats_.UsesSizeTracking()) {
+        struct stat st{};
+        if (::lstat(full_path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            old_size = st.st_size;
+    }
+
+    // Capacity guard – reject if the growth would exceed max_size_bytes_
+    const off_t new_size   = std::max<off_t>(old_size, offset + static_cast<off_t>(data.size()));
+    const uint64_t growth  = (new_size > old_size) ? static_cast<uint64_t>(new_size - old_size) : 0;
+
+    if (stats_.UsesSizeTracking() && growth > 0) {
+        auto avail_res = GetAvailableBytes();
+        if (!avail_res) {
+            return std::unexpected(avail_res.error());
+        }
+        if (growth > *avail_res) {
+            spdlog::warn(
+                "LocalStorage::Write: Out of space – need {} bytes, only {} bytes left.",
+                growth, *avail_res
+            );
+            return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
+        }
+    }
+
+    // Ensure parent directory exists
+    const auto parent_path = full_path.parent_path();
     std::error_code ec;
     if (!std::filesystem::exists(parent_path, ec)) {
-        if (!std::filesystem::create_directories(parent_path, ec)) {
-            if (ec || !std::filesystem::exists(parent_path)) {
-                spdlog::error(
-                    "LocalStorage::Write: Failed create parent cache dir '{}': {}",
-                    parent_path.string(), ec ? ec.message() : "Unknown"
-                );
-                return std::unexpected(MapFilesystemError(
-                    ec ? ec : std::make_error_code(std::errc::io_error), "write_create_parent"
-                ));
-            }
-        }
-        if (ec) {
+        if (!std::filesystem::create_directories(parent_path, ec) ||
+            (ec && !std::filesystem::exists(parent_path))) {
             spdlog::error(
                 "LocalStorage::Write: Failed create parent cache dir '{}': {}",
-                parent_path.string(), ec.message()
+                parent_path.string(), ec ? ec.message() : "Unknown"
             );
-            return std::unexpected(MapFilesystemError(ec, "write_create_parent"));
+            return std::unexpected(MapFilesystemError(
+                ec ? ec : std::make_error_code(std::errc::io_error), "write_create_parent"
+            ));
         }
     } else if (ec) {
         spdlog::error(
@@ -546,10 +535,11 @@ StorageResult<std::size_t> LocalStorage::Write(
         return std::unexpected(MapFilesystemError(ec, "write_check_parent"));
     }
 
-    mode_t default_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // 0644
-    int fd              = ::open(full_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, default_mode);
+    // Open/create file and perform the write
+    constexpr mode_t default_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // 0644
+    const int fd = ::open(full_path.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, default_mode);
     if (fd < 0) {
-        int open_errno = errno;
+        const int open_errno = errno;
         spdlog::error(
             "LocalStorage::Write open failed for '{}': {}", full_path.string(),
             std::strerror(open_errno)
@@ -560,15 +550,29 @@ StorageResult<std::size_t> LocalStorage::Write(
     }
     FileDescriptorGuard fd_guard(fd);
 
-    ssize_t bytes_written = ::pwrite(fd, data.data(), data.size(), static_cast<off_t>(offset));
-
+    // Perform the write
+    const ssize_t bytes_written =
+        ::pwrite(fd, data.data(), data.size(), static_cast<off_t>(offset));
     if (bytes_written < 0) {
-        int write_errno = errno;
+        const int write_errno = errno;
         spdlog::error(
             "LocalStorage::Write pwrite failed for '{}': {}", full_path.string(),
             std::strerror(write_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(write_errno)));
+    }
+
+    // Update used-bytes counter if enabled
+    if (stats_.UsesSizeTracking()) {
+        struct stat st_after{};
+        if (::fstat(fd, &st_after) == 0 && S_ISREG(st_after.st_mode)) {
+            const off_t new_size = st_after.st_size;
+            if (new_size > old_size) {
+                stats_.IncrementSizeBytes(static_cast<uint64_t>(new_size - old_size));
+            } else if (new_size < old_size) {
+                stats_.DecrementSizeBytes(static_cast<uint64_t>(old_size - new_size));
+            }
+        }
     }
 
     spdlog::trace("LocalStorage::Write -> {} bytes written", bytes_written);
@@ -579,16 +583,20 @@ StorageResult<void> LocalStorage::Remove(const std::filesystem::path& relative_p
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::debug("LocalStorage::Remove({})", relative_path.string());
-    auto full_path = GetValidatedFullPath(relative_path);
-    if (full_path.empty()) {
-        spdlog::trace("LocalStorage::Remove -> InvalidPath");
-        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
-    }
-    spdlog::trace(
-        "LocalStorage::Remove called for: {} (relative: {})", full_path.string(),
-        relative_path.string()
-    );
 
+    const auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    // Capture size prior to removal (only for regular files & tracking)
+    uint64_t size_to_remove = 0;
+    if (stats_.UsesSizeTracking()) {
+        struct stat st{};
+        if (::lstat(full_path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            size_to_remove = static_cast<uint64_t>(st.st_size);
+    }
+
+    // Remove extended attributes
     auto rem_mtime_res = RemoveXattr(full_path, XATTR_ORIGIN_MTIME_KEY);
     if (!rem_mtime_res && rem_mtime_res.error() != make_error_code(StorageErrc::MetadataNotFound)) {
         spdlog::error(
@@ -604,41 +612,31 @@ StorageResult<void> LocalStorage::Remove(const std::filesystem::path& relative_p
         );
     }
 
+    // Guard against accidental base-path deletion
     std::string full_path_str = full_path.string();
     std::string base_path_str = base_path_.string();
-
-    if (!full_path_str.empty() &&
-        full_path_str.back() == std::filesystem::path::preferred_separator) {
+    if (!full_path_str.empty() && full_path_str.back() == fs::path::preferred_separator)
         full_path_str.pop_back();
-    }
-    if (!base_path_str.empty() &&
-        base_path_str.back() == std::filesystem::path::preferred_separator) {
+    if (!base_path_str.empty() && base_path_str.back() == fs::path::preferred_separator)
         base_path_str.pop_back();
-    }
-
     if (full_path_str == base_path_str) {
         spdlog::trace(
-            "LocalStorage::Remove: Attempted to remove base path '{}' for relative path '{}'. "
-            "Skipping deletion.",
-            base_path_.string(), relative_path.string()
+            "LocalStorage::Remove: Attempt to remove base path '{}'. Skipping.", base_path_.string()
         );
-        // TODO: Decide what invalidating '.' should mean. Maybe clear contents?
         return {};
     }
 
+    // Actual filesystem removal
     std::error_code ec;
-
     if (!std::filesystem::remove(full_path, ec)) {
-        if (ec) {
-            if (ec != std::errc::no_such_file_or_directory) {
-                spdlog::warn(
-                    "LocalStorage::Remove failed for '{}': {}", full_path.string(), ec.message()
-                );
-                return std::unexpected(MapFilesystemError(ec, "remove"));
-            }
-        } else {
-            spdlog::trace("LocalStorage::Remove: Path '{}' did not exist.", full_path.string());
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            spdlog::warn(
+                "LocalStorage::Remove failed for '{}': {}", full_path.string(), ec.message()
+            );
+            return std::unexpected(MapFilesystemError(ec, "remove"));
         }
+    } else if (stats_.UsesSizeTracking() && size_to_remove > 0) {
+        stats_.DecrementSizeBytes(size_to_remove);
     }
 
     spdlog::trace("LocalStorage::Remove -> Success");
@@ -649,27 +647,58 @@ StorageResult<void> LocalStorage::Truncate(const std::filesystem::path& relative
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     spdlog::debug("LocalStorage::Truncate({}, {})", relative_path.string(), size);
-    auto full_path = GetValidatedFullPath(relative_path);
+
+    const auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     if (size < 0)
         return std::unexpected(make_error_code(StorageErrc::InvalidOffset));
 
-    if (::truncate(full_path.c_str(), size) == -1) {
-        int trunc_errno = errno;
+    // Obtain previous file size if we track
+    off_t old_size = 0;
+    if (stats_.UsesSizeTracking()) {
+        struct stat st{};
+        if (::lstat(full_path.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+            old_size = st.st_size;
+    }
+    // Guard against quota overflow when growing the file
+    if (stats_.UsesSizeTracking() && size > old_size) {
+        uint64_t growth = static_cast<uint64_t>(size - old_size);
+        auto avail_res  = GetAvailableBytes();
+        if (!avail_res) {
+            return std::unexpected(avail_res.error());
+        }
+        if (growth > *avail_res) {
+            spdlog::warn(
+                "LocalStorage::Truncate: Out of space – need {} bytes, only {} bytes left.",
+                growth, *avail_res
+            );
+            return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
+        }
+    }
 
-        if (trunc_errno == ENOENT) {
+    // Perform truncate
+    if (::truncate(full_path.c_str(), size) == -1) {
+        const int trunc_errno = errno;
+        if (trunc_errno == ENOENT)
             return std::unexpected(make_error_code(StorageErrc::FileNotFound));
-        }
-        if (trunc_errno == EISDIR) {
+        if (trunc_errno == EISDIR)
             return std::unexpected(make_error_code(StorageErrc::IsADirectory));
-        }
 
         spdlog::error(
             "LocalStorage::Truncate failed for '{}': {}", full_path.string(),
             std::strerror(trunc_errno)
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(trunc_errno)));
+    }
+
+    // Update stats delta
+    if (stats_.UsesSizeTracking()) {
+        if (size > old_size) {
+            stats_.IncrementSizeBytes(static_cast<uint64_t>(size - old_size));
+        } else if (size < old_size) {
+            stats_.DecrementSizeBytes(static_cast<uint64_t>(old_size - size));
+        }
     }
 
     spdlog::trace("LocalStorage::Truncate -> Success");
@@ -811,6 +840,7 @@ StorageResult<void> LocalStorage::Move(
         return std::unexpected(MapFilesystemError(ec, "move_check_parent"));
     }
 
+    // TODO: Properly handle quota in edge cases
     std::filesystem::rename(from_full, to_full, ec);
     if (ec)
         return std::unexpected(MapFilesystemError(ec, "move"));
