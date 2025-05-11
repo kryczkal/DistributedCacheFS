@@ -18,6 +18,7 @@ using namespace Storage;
 CacheTier::CacheTier(const Config::CacheDefinition &cache_definition)
     : cache_definition_(cache_definition)
 {
+    spdlog::debug("CacheTier::CacheTier(tier={}, path={})", cache_definition.tier, cache_definition.storage_definition.path);
     {
         auto res = StorageFactory::Create(cache_definition_.storage_definition);
         if (!res) {
@@ -32,17 +33,35 @@ CacheTier::CacheTier(const Config::CacheDefinition &cache_definition)
 StorageResult<std::uint64_t> CacheTier::GetCapacityBytes() const
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->GetCapacityBytes();
+    spdlog::debug("CacheTier::GetCapacityBytes(tier={})", cache_definition_.tier);
+    auto result = storage_instance_->GetCapacityBytes();
+    if (result)
+        spdlog::trace("CacheTier::GetCapacityBytes(tier={}) -> {}", cache_definition_.tier, *result);
+    else
+        spdlog::trace("CacheTier::GetCapacityBytes(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<std::uint64_t> CacheTier::GetUsedBytes() const
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->GetUsedBytes();
+    spdlog::debug("CacheTier::GetUsedBytes(tier={})", cache_definition_.tier);
+    auto result = storage_instance_->GetUsedBytes();
+    if (result)
+        spdlog::trace("CacheTier::GetUsedBytes(tier={}) -> {}", cache_definition_.tier, *result);
+    else
+        spdlog::trace("CacheTier::GetUsedBytes(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<std::uint64_t> CacheTier::GetAvailableBytes() const
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->GetAvailableBytes();
+    spdlog::debug("CacheTier::GetAvailableBytes(tier={})", cache_definition_.tier);
+    auto result = storage_instance_->GetAvailableBytes();
+    if (result)
+        spdlog::trace("CacheTier::GetAvailableBytes(tier={}) -> {}", cache_definition_.tier, *result);
+    else
+        spdlog::trace("CacheTier::GetAvailableBytes(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
     const fs::path &fuse_path, off_t offset, std::span<std::byte> &buffer,
@@ -50,7 +69,7 @@ StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
 )
 {
     std::lock_guard lock(cache_mutex_);
-    spdlog::debug("CacheTier::ReadIfCacheValid");
+    spdlog::debug("CacheTier::ReadItemIfCacheValid({})", fuse_path.string());
     {
         auto validate_item_res = IsCacheItemValid(fuse_path, origin_metadata);
         if (!validate_item_res) {
@@ -94,6 +113,7 @@ StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
         }
     }
     ReheatItem(fuse_path);
+    spdlog::trace("CacheTier::ReadItemIfCacheValid(tier={}) -> Valid: true, Bytes Read: {}", cache_definition_.tier, bytes_read);
     return std::make_pair(true, bytes_read);
 }
 
@@ -106,108 +126,187 @@ StorageResult<std::size_t> CacheTier::Read(
 )
 {
     std::lock_guard lock(cache_mutex_);
-    spdlog::debug("CacheTier::Read({}, {}, {})", fuse_path.string(), offset, buffer.size());
-    return storage_instance_->Read(fuse_path, offset, buffer);
+    spdlog::debug("CacheTier::Read(tier={}, {}, {}, buffer_size={})", cache_definition_.tier, fuse_path.string(), offset, buffer.size());
+    auto result = storage_instance_->Read(fuse_path, offset, buffer);
+    if (result)
+        spdlog::trace("CacheTier::Read(tier={}) -> {} bytes read", cache_definition_.tier, *result);
+    else
+        spdlog::trace("CacheTier::Read(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<std::size_t> CacheTier::Write(
     const std::filesystem::path &fuse_path, off_t offset, std::span<std::byte> &data
 )
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->Write(fuse_path, offset, data);
+    spdlog::debug("CacheTier::Write(tier={}, {}, {}, data_size={})", cache_definition_.tier, fuse_path.string(), offset, data.size());
+    auto result = storage_instance_->Write(fuse_path, offset, data);
+    if (result)
+        spdlog::trace("CacheTier::Write(tier={}) -> {} bytes written", cache_definition_.tier, *result);
+    else
+        spdlog::trace("CacheTier::Write(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::Remove(const std::filesystem::path &fuse_path)
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->Remove(fuse_path);
+    spdlog::debug("CacheTier::Remove(tier={}, {})", cache_definition_.tier, fuse_path.string());
+    auto result = storage_instance_->Remove(fuse_path);
+    if (result)
+        spdlog::trace("CacheTier::Remove(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::Remove(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::Truncate(const std::filesystem::path &fuse_path, off_t size)
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->Truncate(fuse_path, size);
+    spdlog::debug("CacheTier::Truncate(tier={}, {}, {})", cache_definition_.tier, fuse_path.string(), size);
+    auto result = storage_instance_->Truncate(fuse_path, size);
+    if (result)
+        spdlog::trace("CacheTier::Truncate(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::Truncate(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::CreateFile(const std::filesystem::path &fuse_path, mode_t mode)
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->CreateFile(fuse_path, mode);
+    spdlog::debug("CacheTier::CreateFile(tier={}, {}, {:o})", cache_definition_.tier, fuse_path.string(), mode);
+    auto result = storage_instance_->CreateFile(fuse_path, mode);
+    if (result)
+        spdlog::trace("CacheTier::CreateFile(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::CreateFile(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::CreateDirectory(const std::filesystem::path &fuse_path, mode_t mode)
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->CreateDirectory(fuse_path, mode);
+    spdlog::debug("CacheTier::CreateDirectory(tier={}, {}, {:o})", cache_definition_.tier, fuse_path.string(), mode);
+    auto result = storage_instance_->CreateDirectory(fuse_path, mode);
+    if (result)
+        spdlog::trace("CacheTier::CreateDirectory(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::CreateDirectory(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::Move(
     const std::filesystem::path &from_fuse_path, const std::filesystem::path &to_fuse_path
 )
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->Move(from_fuse_path, to_fuse_path);
+    spdlog::debug("CacheTier::Move(tier={}, {}, {})", cache_definition_.tier, from_fuse_path.string(), to_fuse_path.string());
+    auto result = storage_instance_->Move(from_fuse_path, to_fuse_path);
+    if (result)
+        spdlog::trace("CacheTier::Move(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::Move(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheTier::ListDirectory(
     const std::filesystem::path &fuse_path
 )
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->ListDirectory(fuse_path);
+    spdlog::debug("CacheTier::ListDirectory(tier={}, {})", cache_definition_.tier, fuse_path.string());
+    auto result = storage_instance_->ListDirectory(fuse_path);
+    if (result)
+        spdlog::trace("CacheTier::ListDirectory(tier={}) -> {} entries", cache_definition_.tier, result.value().size());
+    else
+        spdlog::trace("CacheTier::ListDirectory(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<bool> CacheTier::CheckIfFileExists(const std::filesystem::path &fuse_path) const
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->CheckIfFileExists(fuse_path);
+    spdlog::debug("CacheTier::CheckIfFileExists(tier={}, {})", cache_definition_.tier, fuse_path.string());
+    auto result = storage_instance_->CheckIfFileExists(fuse_path);
+    if (result)
+        spdlog::trace("CacheTier::CheckIfFileExists(tier={}) -> {}", cache_definition_.tier, *result);
+    else
+        spdlog::trace("CacheTier::CheckIfFileExists(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<struct stat> CacheTier::GetAttributes(const std::filesystem::path &fuse_path) const
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->GetAttributes(fuse_path);
+    spdlog::debug("CacheTier::GetAttributes(tier={}, {})", cache_definition_.tier, fuse_path.string());
+    auto result = storage_instance_->GetAttributes(fuse_path);
+    if (result)
+        spdlog::trace("CacheTier::GetAttributes(tier={}) -> Success (st_mode={:o}, st_size={})", cache_definition_.tier, result.value().st_mode, result.value().st_size);
+    else
+        spdlog::trace("CacheTier::GetAttributes(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::Initialize()
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->Initialize();
+    spdlog::debug("CacheTier::Initialize(tier={})", cache_definition_.tier);
+    // TODO: Load existing metadata from disk
+    auto result = storage_instance_->Initialize();
+    if (result)
+        spdlog::trace("CacheTier::Initialize(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::Initialize(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 StorageResult<void> CacheTier::Shutdown()
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->Shutdown();
+    spdlog::debug("CacheTier::Shutdown(tier={})", cache_definition_.tier);
+    auto result = storage_instance_->Shutdown();
+    if (result)
+        spdlog::trace("CacheTier::Shutdown(tier={}) -> Success");
+    else
+        spdlog::trace("CacheTier::Shutdown(tier={}) -> Error: {}", cache_definition_.tier, result.error().message());
+    return result;
 }
 std::filesystem::path CacheTier::RelativeToAbsPath(const std::filesystem::path &fuse_path) const
 {
     std::lock_guard lock(cache_mutex_);
-    return storage_instance_->RelativeToAbsPath(fuse_path);
+    spdlog::debug("CacheTier::RelativeToAbsPath(tier={}, {})", cache_definition_.tier, fuse_path.string());
+    auto result = storage_instance_->RelativeToAbsPath(fuse_path);
+    spdlog::trace("CacheTier::RelativeToAbsPath(tier={}) -> {}", cache_definition_.tier, result.string());
+    return result;
 }
 
 StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path &fuse_path)
 {
     std::lock_guard lock(cache_mutex_);
-    spdlog::debug("CacheTier::InvalidateAndRemoveEntry({})", fuse_path.string());
+    spdlog::debug("CacheTier::InvalidateAndRemoveItem(tier={}, {})", cache_definition_.tier, fuse_path.string());
 
     // Remove backing file first – only drop metadata once that succeeds
     auto rm_res = storage_instance_->Remove(fuse_path);
     if (!rm_res) {
+        spdlog::trace("CacheTier::InvalidateAndRemoveItem(tier={}) -> Error removing backing file: {}", cache_definition_.tier, rm_res.error().message());
         return std::unexpected(rm_res.error());
     }
 
     item_metadatas_.erase(fuse_path);
+    spdlog::trace("CacheTier::InvalidateAndRemoveItem(tier={}) -> Success");
     return {};
 }
 StorageResult<const ItemMetadata> CacheTier::GetItemMetadata(const fs::path &fuse_path)
 {
     std::lock_guard lock(cache_mutex_);
-    spdlog::debug("CacheTier::GetItemMetadata({})", fuse_path.string());
+    spdlog::debug("CacheTier::GetItemMetadata(tier={}, {})", cache_definition_.tier, fuse_path.string());
     auto it = item_metadatas_.find(fuse_path);
     if (it == item_metadatas_.end()) {
         spdlog::error(
             "CacheTier::GetItemMetadata: Item {} not found in metadata.", fuse_path.string()
         );
+        spdlog::trace("CacheTier::GetItemMetadata(tier={}) -> Error: InvalidPath", cache_definition_.tier);
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    spdlog::trace("CacheTier::GetItemMetadata(tier={}) -> Success (path={}, size={})", cache_definition_.tier, it->path.string(), it->coherency_metadata.size_bytes);
     return *it;
 }
 StorageResult<void> CacheTier::InsertItemMetadata(const ItemMetadata &item_metadata)
 {
     std::lock_guard lock(cache_mutex_);
     spdlog::debug(
-        "CacheTier::InsertItemMetadata({}, {})", item_metadata.path.string(),
+        "CacheTier::InsertItemMetadata(tier={}, {}, size_bytes={})", cache_definition_.tier, item_metadata.path.string(),
         item_metadata.coherency_metadata.size_bytes
     );
     auto [it, inserted] = item_metadatas_.insert(item_metadata);
@@ -216,8 +315,10 @@ StorageResult<void> CacheTier::InsertItemMetadata(const ItemMetadata &item_metad
             "CacheTier::InsertItemMetadata: Item {} already exists in metadata.",
             item_metadata.path.string()
         );
+        spdlog::trace("CacheTier::InsertItemMetadata(tier={}) -> Error: InvalidPath (already exists)", cache_definition_.tier);
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    spdlog::trace("CacheTier::InsertItemMetadata(tier={}) -> Success");
     return {};
 }
 StorageResult<bool> CacheTier::CacheItemIfWorthIt(
@@ -226,7 +327,7 @@ StorageResult<bool> CacheTier::CacheItemIfWorthIt(
 )
 {
     std::lock_guard lock(cache_mutex_);
-    spdlog::debug("CacheTier::InsertIfWorth({}, {}, {})", fuse_path.string(), offset, data.size());
+    spdlog::debug("CacheTier::CacheItemIfWorthIt(tier={}, {}, {}, data_size={}, item_path={})", cache_definition_.tier, fuse_path.string(), offset, data.size(), item_metadata.path.string());
     {
         auto res = IsItemWorthInserting(item_metadata);
         if (!res) {
@@ -234,7 +335,8 @@ StorageResult<bool> CacheTier::CacheItemIfWorthIt(
                 "CacheTier::InsertIfWorth: Failed to check if item is worth inserting: {}",
                 res.error().message()
             );
-            return std::unexpected(res.error());
+            spdlog::trace("CacheTier::CacheItemIfWorthIt(tier={}) -> Error: {}", cache_definition_.tier, res.error().message());
+            return false;
         }
         if (!*res) {
             spdlog::trace(
@@ -248,11 +350,14 @@ StorageResult<bool> CacheTier::CacheItemIfWorthIt(
         auto res = CacheItemForcibly(fuse_path, offset, data, item_metadata);
         if (!res) {
             spdlog::error(
-                "CacheTier::InsertIfWorth: Failed to force cache item: {}", res.error().message()
+                "CacheTier::InsertIfWorth: Failed to forcibly cache item: {}",
+                res.error().message()
             );
+            spdlog::trace("CacheTier::CacheItemIfWorthIt(tier={}) -> Error: {}", cache_definition_.tier, res.error().message());
             return std::unexpected(res.error());
         }
     }
+    spdlog::trace("CacheTier::CacheItemIfWorthIt(tier={}) -> Success (cached)", cache_definition_.tier);
     return true;
 }
 StorageResult<void> CacheTier::CacheItemForcibly(
@@ -261,7 +366,12 @@ StorageResult<void> CacheTier::CacheItemForcibly(
 )
 {
     std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
-    spdlog::debug("CacheTier::ForceCache({}, {}, {})", fuse_path.string(), offset, data.size());
+    spdlog::debug(
+        "CacheTier::CacheItemForcibly(tier={}, {}, {}, data_size={}, item_path={}, item_size={})",
+        cache_definition_.tier, fuse_path.string(), offset, data.size(), item_metadata.path.string(), item_metadata.coherency_metadata.size_bytes
+    );
+
+    // Make space if needed
     {
         auto res = FreeUpSpace(item_metadata.coherency_metadata.size_bytes);
         if (!res) {
@@ -282,6 +392,7 @@ StorageResult<void> CacheTier::CacheItemForcibly(
         }
     }
     item_metadatas_.insert(item_metadata);
+    spdlog::trace("CacheTier::CacheItemForcibly(tier={}) -> Success", cache_definition_.tier);
     return {};
 }
 StorageResult<bool> CacheTier::IsCacheItemValid(
@@ -459,7 +570,7 @@ void CacheTier::ReheatItem(const fs::path &fuse_path)
 
     static std::atomic<std::uint64_t> global_hits{0};
     if ((++global_hits % Constants::HEAT_REFRESH_PERIOD) == 0) {
-        MaybeRefreshRandomHeats();
+        RefreshRandomHeats();
     }
 }
 void CacheTier::UpdateItemHeat(const fs::path &fuse_path)
@@ -473,9 +584,11 @@ void CacheTier::UpdateItemHeat(const fs::path &fuse_path)
         m.heat_metadata.heat = CalculateItemHeat(fuse_path, m, now);
     });
 }
-void CacheTier::MaybeRefreshRandomHeats()
+void CacheTier::RefreshRandomHeats()
 {
     std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+    spdlog::debug("CacheTier::RefreshRandomHeats()");
+
     if (item_metadatas_.empty())
         return;
 

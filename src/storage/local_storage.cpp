@@ -135,6 +135,7 @@ StorageResult<void> LocalStorage::SetXattr(
     const std::filesystem::path& full_path, const char* key, const void* value, size_t size
 )
 {
+    spdlog::debug("LocalStorage::SetXattr({}, {}, value_ptr, {})", full_path.string(), key, size);
     if (::setxattr(full_path.c_str(), key, value, size, 0) == -1) {
         int xattr_errno = errno;
         spdlog::warn(
@@ -143,6 +144,7 @@ StorageResult<void> LocalStorage::SetXattr(
         );
         return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
     }
+    spdlog::trace("LocalStorage::SetXattr -> Success");
     return {};
 }
 
@@ -187,6 +189,7 @@ StorageResult<void> LocalStorage::RemoveXattr(
     const std::filesystem::path& full_path, const char* key
 )
 {
+    spdlog::debug("LocalStorage::RemoveXattr({}, {})", full_path.string(), key);
     if (::removexattr(full_path.c_str(), key) == -1) {
         int xattr_errno = errno;
         // Ignore error if attribute simply doesn't exist
@@ -202,6 +205,7 @@ StorageResult<void> LocalStorage::RemoveXattr(
             full_path.string()
         );
     }
+    spdlog::trace("LocalStorage::RemoveXattr -> Success");
     return {};
 }
 
@@ -268,6 +272,7 @@ std::error_code LocalStorage::MapFilesystemError(
 StorageResult<void> LocalStorage::Initialize()
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::Initialize()");
     std::error_code ec;
 
     if (!std::filesystem::exists(base_path_, ec)) {
@@ -322,20 +327,23 @@ StorageResult<void> LocalStorage::Initialize()
 
     // TODO: Scan existing cache contents to populate initial metadata (access_times_, used_bytes_)
 
+    spdlog::trace("LocalStorage::Initialize -> Success");
     return {};
 }
 
 StorageResult<void> LocalStorage::Shutdown()
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
-    spdlog::debug("Shutting down LocalStorage for path: {}", base_path_.string());
+    spdlog::debug("LocalStorage::Shutdown() for path: {}", base_path_.string());
     // No specific action currently needed on shutdown
+    spdlog::trace("LocalStorage::Shutdown -> Success");
     return {};
 }
 
 StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::GetCapacityBytes()");
     std::error_code ec;
     fs::space_info space = fs::space(base_path_, ec);
     if (ec) {
@@ -346,14 +354,17 @@ StorageResult<std::uint64_t> LocalStorage::GetCapacityBytes() const
         return std::unexpected(MapFilesystemError(ec, "get_capacity"));
     }
     if (definition_.max_size_bytes.has_value()) {
+        spdlog::trace("LocalStorage::GetCapacityBytes -> {}", std::min(space.capacity, *definition_.max_size_bytes));
         return std::min(space.capacity, *definition_.max_size_bytes);
     }
+    spdlog::trace("LocalStorage::GetCapacityBytes -> {}", space.capacity);
     return space.capacity;
 }
 
 StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::GetUsedBytes()");
 
     // TODO: Implement accurate tracking of used bytes.
     // This currently estimates based on capacity - available from fs::space_info,
@@ -387,14 +398,18 @@ StorageResult<std::uint64_t> LocalStorage::GetUsedBytes() const
     uint64_t actual_used = actual_capacity > actual_free ? actual_capacity - actual_free : 0;
 
     if (definition_.max_size_bytes.has_value()) {
-        return std::min(actual_used, *definition_.max_size_bytes);
+        uint64_t result = std::min(actual_used, *definition_.max_size_bytes);
+        spdlog::trace("LocalStorage::GetUsedBytes -> {}", result);
+        return result;
     }
+    spdlog::trace("LocalStorage::GetUsedBytes -> {}", actual_used);
     return actual_used;
 }
 
 StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::GetAvailableBytes()");
     std::error_code ec;
     fs::space_info space = fs::space(base_path_, ec); // Actual free space on the physical device
     if (ec) {
@@ -406,6 +421,7 @@ StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
     }
 
     uint64_t actual_filesystem_free_space = space.available;
+    uint64_t result;
 
     if (definition_.max_size_bytes.has_value()) {
         uint64_t defined_capacity = *definition_.max_size_bytes;
@@ -424,10 +440,12 @@ StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
         } else {
             available_within_defined_limit = defined_capacity - current_managed_used_bytes;
         }
-        return std::min(available_within_defined_limit, actual_filesystem_free_space);
+        result = std::min(available_within_defined_limit, actual_filesystem_free_space);
+    } else {
+        result = actual_filesystem_free_space;
     }
-    
-    return actual_filesystem_free_space;
+    spdlog::trace("LocalStorage::GetAvailableBytes -> {}", result);
+    return result;
 }
 
 StorageResult<std::size_t> LocalStorage::Read(
@@ -435,6 +453,7 @@ StorageResult<std::size_t> LocalStorage::Read(
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::Read({}, {}, buffer_size={})", relative_path.string(), offset, buffer.size());
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -468,6 +487,7 @@ StorageResult<std::size_t> LocalStorage::Read(
         return std::unexpected(make_error_code(ErrnoToStorageErrc(read_errno)));
     }
 
+    spdlog::trace("LocalStorage::Read -> {} bytes read", bytes_read);
     return static_cast<size_t>(bytes_read);
 }
 
@@ -476,6 +496,7 @@ StorageResult<std::size_t> LocalStorage::Write(
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::Write({}, {}, data_size={})", relative_path.string(), offset, data.size());
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -536,14 +557,17 @@ StorageResult<std::size_t> LocalStorage::Write(
         return std::unexpected(make_error_code(ErrnoToStorageErrc(write_errno)));
     }
 
+    spdlog::trace("LocalStorage::Write -> {} bytes written", bytes_written);
     return static_cast<size_t>(bytes_written);
 }
 
 StorageResult<void> LocalStorage::Remove(const std::filesystem::path& relative_path)
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::Remove({})", relative_path.string());
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
+        spdlog::trace("LocalStorage::Remove -> InvalidPath");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     spdlog::trace(
@@ -603,12 +627,14 @@ StorageResult<void> LocalStorage::Remove(const std::filesystem::path& relative_p
         }
     }
 
+    spdlog::trace("LocalStorage::Remove -> Success");
     return {};
 }
 
 StorageResult<void> LocalStorage::Truncate(const std::filesystem::path& relative_path, off_t size)
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::Truncate({}, {})", relative_path.string(), size);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -632,6 +658,7 @@ StorageResult<void> LocalStorage::Truncate(const std::filesystem::path& relative
         return std::unexpected(make_error_code(ErrnoToStorageErrc(trunc_errno)));
     }
 
+    spdlog::trace("LocalStorage::Truncate -> Success");
     return {};
 }
 
@@ -639,8 +666,10 @@ StorageResult<bool> LocalStorage::CheckIfFileExists(const std::filesystem::path&
 ) const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::CheckIfFileExists({})", relative_path.string());
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
+        spdlog::trace("LocalStorage::CheckIfFileExists -> InvalidPath");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -653,6 +682,7 @@ StorageResult<bool> LocalStorage::CheckIfFileExists(const std::filesystem::path&
         );
         return std::unexpected(MapFilesystemError(ec, "probe"));
     }
+    spdlog::trace("LocalStorage::CheckIfFileExists -> {}", exists);
     return exists;
 }
 StorageResult<void> LocalStorage::CreateFile(
@@ -660,8 +690,10 @@ StorageResult<void> LocalStorage::CreateFile(
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::CreateFile({}, {:o})", relative_path.string(), mode);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
+        spdlog::trace("LocalStorage::CreateFile -> InvalidPath");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     auto parent = full_path.parent_path();
@@ -692,6 +724,7 @@ StorageResult<void> LocalStorage::CreateFile(
     if (ec) {
         return std::unexpected(MapFilesystemError(ec, "create_file_perm"));
     }
+    spdlog::trace("LocalStorage::CreateFile -> Success");
     return {};
 }
 StorageResult<void> LocalStorage::CreateDirectory(
@@ -699,8 +732,10 @@ StorageResult<void> LocalStorage::CreateDirectory(
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::CreateDirectory({}, {:o})", relative_path.string(), mode);
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
+        spdlog::trace("LocalStorage::CreateDirectory -> InvalidPath");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     std::error_code ec;
@@ -734,6 +769,7 @@ StorageResult<void> LocalStorage::CreateDirectory(
         );
         return std::unexpected(MapFilesystemError(ec, "create_directory_perm"));
     }
+    spdlog::trace("LocalStorage::CreateDirectory -> Success");
     return {};
 }
 StorageResult<void> LocalStorage::Move(
@@ -741,6 +777,7 @@ StorageResult<void> LocalStorage::Move(
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::Move({}, {})", from_relative_path.string(), to_relative_path.string());
     auto from_full = GetValidatedFullPath(from_relative_path);
     if (from_full.empty())
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
@@ -762,6 +799,7 @@ StorageResult<void> LocalStorage::Move(
     if (ec)
         return std::unexpected(MapFilesystemError(ec, "move"));
 
+    spdlog::trace("LocalStorage::Move -> Success");
     return {};
 }
 
@@ -769,8 +807,10 @@ StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::pa
 ) const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::GetAttributes({})", relative_path.string());
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
+        spdlog::trace("LocalStorage::GetAttributes -> InvalidPath");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -788,6 +828,7 @@ StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::pa
         );
         return std::unexpected(make_error_code(ErrnoToStorageErrc(stat_errno)));
     }
+    spdlog::trace("LocalStorage::GetAttributes -> Success (st_mode={:o}, st_size={})", stbuf.st_mode, stbuf.st_size);
     return stbuf;
 }
 
@@ -800,8 +841,10 @@ StorageResult<std::vector<std::pair<std::string, struct stat>>> LocalStorage::Li
 )
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    spdlog::debug("LocalStorage::ListDirectory({})", relative_path.string());
     auto full_path = GetValidatedFullPath(relative_path);
     if (full_path.empty()) {
+        spdlog::trace("LocalStorage::ListDirectory -> InvalidPath");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
@@ -822,6 +865,7 @@ StorageResult<std::vector<std::pair<std::string, struct stat>>> LocalStorage::Li
         }
         entries.emplace_back(entry.path().filename().string(), stbuf);
     }
+    spdlog::trace("LocalStorage::ListDirectory -> {} entries", entries.size());
     return entries;
 }
 

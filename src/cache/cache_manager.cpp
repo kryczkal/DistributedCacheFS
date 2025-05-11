@@ -65,6 +65,7 @@ StorageResult<void> CacheManager::InitializeAll()
             tier_to_cache_[cache_definition.tier].push_back(std::move(cache_instance));
         }
     }
+    spdlog::trace("CacheManager::InitializeAll -> Success");
     return {};
 }
 
@@ -111,6 +112,7 @@ StorageResult<void> CacheManager::ShutdownAll()
         return std::unexpected(first_error);
     }
 
+    spdlog::trace("CacheManager::ShutdownAll -> Success");
     return {};
 }
 
@@ -145,6 +147,7 @@ StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fu
         }
     }
 
+    spdlog::trace("CacheManager::GetAttributes -> Success (st_mode={:o}, st_size={})", origin_stat.st_mode, origin_stat.st_size);
     return origin_stat;
 }
 StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheManager::ListDirectory(
@@ -157,7 +160,12 @@ StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheManager::Li
     }
 
     // Always fetch from origin
-    return origin_->ListDirectory(fuse_path);
+    auto result = origin_->ListDirectory(fuse_path);
+    if (result)
+        spdlog::trace("CacheManager::ListDirectory -> {} entries", result.value().size());
+    else
+        spdlog::trace("CacheManager::ListDirectory -> Error: {}", result.error().message());
+    return result;
 }
 
 StorageResult<size_t> CacheManager::ReadFile(
@@ -192,7 +200,12 @@ StorageResult<size_t> CacheManager::ReadFile(
     }
 
     // miss → fetch & (maybe) cache
-    return FetchAndTryCache(fuse_path, offset, buffer);
+    auto result = FetchAndTryCache(fuse_path, offset, buffer);
+    if (result)
+        spdlog::trace("CacheManager::ReadFile -> {} bytes read from origin/cache", *result);
+    else
+        spdlog::trace("CacheManager::ReadFile -> Error: {}", result.error().message());
+    return result;
 }
 
 StorageResult<size_t> CacheManager::WriteFile(
@@ -234,6 +247,7 @@ StorageResult<size_t> CacheManager::WriteFile(
         }
     }
 
+    spdlog::trace("CacheManager::WriteFile -> {} bytes written", bytes_written);
     return bytes_written;
 }
 
@@ -269,6 +283,7 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
         }
     }
 
+    spdlog::trace("CacheManager::CreateFile -> Success");
     return {};
 }
 
@@ -304,6 +319,7 @@ StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_pa
         }
     }
 
+    spdlog::trace("CacheManager::CreateDirectory -> Success");
     return {};
 }
 
@@ -340,6 +356,7 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
         }
     }
 
+    spdlog::trace("CacheManager::Remove -> Success");
     return {};
 }
 
@@ -378,6 +395,7 @@ StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path,
         }
     }
 
+    spdlog::trace("CacheManager::TruncateFile -> Success");
     return {};
 }
 
@@ -429,6 +447,7 @@ StorageResult<void> CacheManager::Move(
         }
     }
 
+    spdlog::trace("CacheManager::Move -> Success");
     return {};
 }
 
@@ -442,6 +461,7 @@ StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_pa
     spdlog::warn("CacheManager::GetFilesystemStats not implemented", fuse_path.string());
     // Do statvfs on the origin path
     struct statvfs origin_statvfs = {};
+    spdlog::trace("CacheManager::GetFilesystemStats -> Success (dummy data)");
     return origin_statvfs;
 }
 
@@ -526,6 +546,7 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
         std::unique_lock w_lock(metadata_mutex_);
         file_to_cache_[fuse_path] = tier;
     }
+    spdlog::trace("CacheManager::FetchAndTryCache -> {} bytes for caller", bytes_for_caller);
     return bytes_for_caller;
 }
 StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
@@ -534,8 +555,10 @@ StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
 {
     std::shared_lock tiers_rlock(tier_mutex_);  // hierarchy: tier_mutex_ before metadata_mutex_
     spdlog::debug("CacheManager::SelectCacheTierForWrite({})", item_metadata.path.string());
-    if (tier_to_cache_.empty())
+    if (tier_to_cache_.empty()) {
+        spdlog::trace("CacheManager::SelectCacheTierForWrite -> No cache tiers, returning nullptr");
         return nullptr;  // no cache at all
+    }
 
     for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {  // slowest first
         for (const auto& tier : it->second) {
@@ -547,12 +570,13 @@ StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
                     "CacheManager::SelectCacheTierForWrite: Found cache tier {} for {}",
                     tier->GetTier(), item_metadata.path.string()
                 );
+                spdlog::trace("CacheManager::SelectCacheTierForWrite -> Selected tier {}", tier->GetTier());
                 return tier;  // first slow tier that accepts
             }
         }
     }
     spdlog::trace(
-        "CacheManager::SelectCacheTierForWrite: No cache tier found for {}",
+        "CacheManager::SelectCacheTierForWrite: No suitable cache tier found for {}. Returning nullptr",
         item_metadata.path.string()
     );
     return nullptr;  // nothing suitable
@@ -575,6 +599,7 @@ StorageResult<void> CacheManager::RemoveMetadataInvalidateCache(
     }
     std::unique_lock lock(metadata_mutex_);
     file_to_cache_.erase(fuse_path);
+    spdlog::trace("CacheManager::RemoveMetadataInvalidateCache -> Success");
     return {};
 }
 
@@ -637,6 +662,7 @@ StorageResult<void> CacheManager::TryPromoteItem(fs::path& fuse_path)
         current_tier->InvalidateAndRemoveItem(fuse_path);  // best‑effort
         break;
     }
+    spdlog::trace("CacheManager::TryPromoteItem -> Success");
     return {};
 }
 StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(const fs::path& fuse_path
@@ -651,8 +677,8 @@ StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(const 
         );
         return std::unexpected(res.error());
     }
+    spdlog::trace("CacheManager::GetOriginCoherencyMetadata -> mtime={}, size={}", res.value().st_mtime, res.value().st_size);
     return CoherencyMetadata{res.value().st_mtime, res.value().st_size};
 }
 
 }  // namespace DistributedCacheFS::Cache
-;

@@ -123,7 +123,7 @@ class CacheTier : public Storage::IStorage
     void UpdateItemHeat(const fs::path& fuse_path);
 
     /// Opportunistic refresh of a random subset of items; call periodically
-    void MaybeRefreshRandomHeats();
+    void RefreshRandomHeats();
 
     StorageResult<void> InvalidateAndRemoveItem(const fs::path& fuse_path);
 
