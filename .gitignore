@@ -1,2 +1,129 @@
 cmake-build-*/
+build/
+dist/
 .idea/
+.vscode/
+
+.clang-format
+.clang-tidy
+.clang-tidy-diff.html
+.clang-tidy-diff.txt
+.clang-tidy-diff.yaml
+.clang-tidy-diff.json
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# CTest specific output directory (if not inside an already ignored build directory)
+Testing/
+
+# Compiled object files, libraries, and executables
+# (if not exclusively in already ignored build/dist directories)
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.* # For versioned shared objects
+*.dylib
+*.dll
+*.exe
+*.out # Common executable name on Unix-like systems
+*.app # macOS application bundles
+*.bundle # macOS bundles
+
+# Precompiled header files
+*.pch # MSVC
+*.gch # GCC/Clang
+
+# Debugging files
+*.pdb # MSVC program database files
+*.idb # MSVC
+*.ilk # MSVC incremental link files
+*.exp # MSVC export files
+*.manifest # MSVC manifest files
+*.map # Linker map files
+
+# IDE-specific files (for other common IDEs)
+# Visual Studio
+*.sln
+*.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.ncb # Visual Studio 6.0
+*.suo # Visual Studio Solution User Options (older versions)
+# Qt Creator
+*.pro.user*
+*.creator.user*
+# KDevelop
+*.kdev4/
+*.kdevpgj
+# Code::Blocks
+*.cbp
+*.depend
+*.layout
+# Eclipse CDT
+.cproject
+.project
+.settings/
+# NetBeans
+nbproject/
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+Build/
+
+# Testing & Coverage reports
+*.gcno
+*.gcda
+*.gcov
+*.profraw # Clang coverage format
+*.profdata # Clang coverage format
+coverage/
+lcov_output/
+report.*/ # Common for HTML reports, e.g., gcovr
+htmlcov/ # Python coverage tool, but sometimes used for C++
+
+# Log files
+*.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary & Backup files
+*~
+*.swp
+*.swo
+*.swn # Netbeans swap file
+*.bak
+*.bak*
+*.old
+*.tmp
+*.temp
+*.orig # Patch original files
+*.rej # Patch rejected files
+*.DS_Store~ # macOS .DS_Store backup
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+._* # macOS resource fork files
+
+# Packaging
+*.tar.gz
+*.tar.bz2
+*.zip
+*.rpm
+*.deb
+
