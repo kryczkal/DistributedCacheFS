@@ -41,7 +41,7 @@ std::optional<spdlog::level::level_enum> StringToLogLevel(const std::string &lev
 //------------------------------------------------------------------------------//
 
 struct CacheSettings {
-    double decay_constant = 0.0001;  ///< Decay constant per second
+    double decay_constant = Constants::DEFAULT_DECAY_CONSTANT;
 
     bool isValid() const;
 };

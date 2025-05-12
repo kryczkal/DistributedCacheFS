@@ -61,6 +61,22 @@ StorageResult<void> CacheManager::InitializeAll()
             auto cache_instance = std::make_shared<CacheTier>(cache_definition);
             if (auto res = cache_instance->Initialize(); !res)
                 return std::unexpected(res.error());
+            
+            cache_instance->SetMappingCallback(
+                [this](const fs::path& p,
+                       const std::shared_ptr<CacheTier>& tier,
+                       bool add)
+                {
+                    std::unique_lock w(metadata_mutex_);
+                    if (add) {
+                        file_to_cache_[p] = tier;
+                    } else {
+                        auto it = file_to_cache_.find(p);
+                        if (it != file_to_cache_.end() && it->second == tier) {
+                            file_to_cache_.erase(it);
+                        }
+                    }
+                });
 
             tier_to_cache_[cache_definition.tier].push_back(std::move(cache_instance));
         }
@@ -753,21 +769,65 @@ StorageResult<void> CacheManager::TryPromoteItem(fs::path& fuse_path)
 
     // attempt promotion into the first tier that accepts it
     for (const auto& faster : faster_tiers) {
-        auto worth = faster->IsItemWorthInserting(meta);
-        if (!worth)
-            return std::unexpected(worth.error());
-        if (!*worth)
-            continue;
+        faster->RefreshRandomHeats(); // Update heats in the faster tier
 
-        faster->CacheItemForcibly(fuse_path, 0, span, meta);
+        auto worth = faster->IsItemWorthInserting(meta);
+        if (!worth) {
+            spdlog::error(
+                "CacheManager::TryPromoteItem: Error checking if item {} is worth inserting into "
+                "tier {}: {}",
+                meta.path.string(), faster->GetTier(), worth.error().message()
+            );
+            return std::unexpected(worth.error());
+        }
+        if (!*worth) {
+            spdlog::trace(
+                "CacheManager::TryPromoteItem: Item {} not worth inserting into faster tier {}. "
+                "Continuing to next faster tier if any.",
+                meta.path.string(), faster->GetTier()
+            );
+            continue; // Try next faster tier
+        }
+
+        // Item is worth inserting, now try to cache it forcibly
+        auto forcibly_res = faster->CacheItemForcibly(fuse_path, 0, span, meta);
+        if (!forcibly_res) {
+            spdlog::error(
+                "CacheManager::TryPromoteItem: Failed to forcibly cache item {} to faster tier "
+                "{}: {}. Aborting promotion attempt.",
+                fuse_path.string(), faster->GetTier(), forcibly_res.error().message()
+            );
+            return std::unexpected(forcibly_res.error());
+        }
+
+        // Promotion to this 'faster' tier was successful
+        spdlog::info(
+            "CacheManager::TryPromoteItem: Promoted item {} from tier {} to tier {}",
+            fuse_path.string(), current_level, faster->GetTier()
+        );
         {
             std::unique_lock meta_wlock(metadata_mutex_);
             file_to_cache_[fuse_path] = faster;
         }
-        current_tier->InvalidateAndRemoveItem(fuse_path);  // best‑effort
-        break;
+        auto invalidate_res = current_tier->InvalidateAndRemoveItem(fuse_path);
+        if (!invalidate_res) {
+            spdlog::warn(
+                "CacheManager::TryPromoteItem: Failed to invalidate/remove item {} from original "
+                "tier {} after promotion: {}. Continuing, but old cache entry might remain.",
+                fuse_path.string(), current_tier->GetTier(),
+                invalidate_res.error().message()
+            );
+            // This is a best-effort, so we don't return an error here.
+        }
+        return {}; 
     }
-    spdlog::trace("CacheManager::TryPromoteItem -> Success");
+
+    // If loop completes, item was not promoted to any faster tier
+    spdlog::trace(
+        "CacheManager::TryPromoteItem: Item {} was not promoted (no suitable faster tier or not "
+        "worth it).",
+        fuse_path.string()
+    );
     return {};
 }
 StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(const fs::path& fuse_path

@@ -494,6 +494,11 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path &fuse_path
         return std::unexpected(remove_res.error());
     }
 
+    // Notify cache manager of removed mapping
+    if (mapping_cb_) {
+        mapping_cb_(fuse_path, shared_from_this(), false);
+    }
+
     spdlog::trace(
         "CacheTier::InvalidateAndRemoveItem: Item {} ({} bytes) removed.", fuse_path.string(),
         item_size
@@ -607,7 +612,7 @@ StorageResult<void> CacheTier::CacheItemForcibly(
         item_metadata.path.string(), item_metadata.coherency_metadata.size_bytes
     );
 
-    // Make space if needed
+    // Ensure space
     {
         auto res = FreeUpSpace(item_metadata.coherency_metadata.size_bytes);
         if (!res) {
@@ -618,6 +623,7 @@ StorageResult<void> CacheTier::CacheItemForcibly(
             return std::unexpected(res.error());
         }
     }
+    // Write data to cache
     {
         auto res = Write(fuse_path, 0, data);
         if (!res) {
@@ -627,7 +633,14 @@ StorageResult<void> CacheTier::CacheItemForcibly(
             return std::unexpected(res.error());
         }
     }
+
+    // Insert metadata
     item_metadatas_.insert(item_metadata);
+
+    // Notify cache manager of new mapping
+    if (mapping_cb_) {
+        mapping_cb_(fuse_path, shared_from_this(), true);
+    }
     spdlog::trace("CacheTier::CacheItemForcibly(tier={}) -> Success", cache_definition_.tier);
     return {};
 }
@@ -672,7 +685,7 @@ StorageResult<bool> CacheTier::IsCacheItemValid(
         return false;
     }
 }
-StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) const
+StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item)
 {
     std::lock_guard lock(cache_mutex_);
     spdlog::trace(
@@ -688,6 +701,8 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item) co
     // Quick accept if it already fits without eviction
     if (item.coherency_metadata.size_bytes <= static_cast<off_t>(avail))
         return true;
+
+    RefreshRandomHeats();
 
     // Simulate eviction of coldest items until either we have enough space
     // or the cumulative heat of evicted items exceeds the candidate's heat.
@@ -835,25 +850,48 @@ void CacheTier::UpdateItemHeat(const fs::path &fuse_path)
 }
 void CacheTier::RefreshRandomHeats()
 {
-    std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
-    spdlog::debug("CacheTier::RefreshRandomHeats()");
-
-    if (item_metadatas_.empty())
-        return;
+    spdlog::debug("CacheTier::RefreshRandomHeats() entered");
 
     thread_local std::mt19937 rng{std::random_device{}()};
     std::uniform_real_distribution<double> dice(0.0, 1.0);
 
-    auto it = item_metadatas_.begin();
-    while (it != item_metadatas_.end()) {
-        if (dice(rng) < Constants::HEAT_REFRESH_PROBABILITY) {
-            const fs::path p = it->path;
-            // iterator might be invalidated by modify; copy path first
-            ++it;  // advance before modify
-            UpdateItemHeat(p);
-        } else {
-            ++it;
+    std::vector<fs::path> paths_to_update_snapshot;
+    {
+        std::lock_guard<std::recursive_mutex> lock(cache_mutex_);
+        if (item_metadatas_.empty()) {
+            spdlog::trace("CacheTier::RefreshRandomHeats: metadata empty, returning.");
+            return;
         }
+        paths_to_update_snapshot.reserve(
+            static_cast<size_t>(item_metadatas_.size() * Constants::HEAT_REFRESH_PROBABILITY) + 1
+        );
+
+        for (const auto& metadata_item : item_metadatas_) {
+            if (dice(rng) < Constants::HEAT_REFRESH_PROBABILITY) {
+                paths_to_update_snapshot.push_back(metadata_item.path);
+            }
+        }
+    } // cache_mutex_ is released here
+
+    if (paths_to_update_snapshot.empty()) {
+        spdlog::trace("CacheTier::RefreshRandomHeats: No items selected for heat update, returning.");
+        return;
     }
+    
+    spdlog::debug(
+        "CacheTier::RefreshRandomHeats: Selected {} path(s) for heat update. Proceeding.",
+        paths_to_update_snapshot.size()
+    );
+
+    std::uint64_t updates_performed = 0;
+    for (const auto& p : paths_to_update_snapshot) {
+        // UpdateItemHeat acquires its own lock
+        UpdateItemHeat(p);
+        updates_performed++;
+    }
+    spdlog::debug(
+        "CacheTier::RefreshRandomHeats: Completed. {} item(s) had their heat updated.",
+        updates_performed
+    );
 }
 }  // namespace DistributedCacheFS::Cache
