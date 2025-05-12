@@ -37,7 +37,7 @@ struct ItemMetadata {
     CoherencyMetadata coherency_metadata;
 };
 
-class CacheTier : public Storage::IStorage
+class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<CacheTier> 
 {
     private:
     //------------------------------------------------------------------------------//
@@ -92,6 +92,15 @@ class CacheTier : public Storage::IStorage
     StorageResult<void> Initialize() override;
     StorageResult<void> Shutdown() override;
 
+
+    void SetMappingCallback(
+        std::function<void(const fs::path&,
+                           const std::shared_ptr<CacheTier>&,
+                           bool /*add?*/)> cb)
+    {
+        mapping_cb_ = std::move(cb);
+    }
+
     //------------------------------------------------------------------------------//
     // Public Fields
     //------------------------------------------------------------------------------//
@@ -115,7 +124,7 @@ class CacheTier : public Storage::IStorage
         const fs::path& fuse_path, const CoherencyMetadata& origin_metadata
     ) const;
 
-    StorageResult<bool> IsItemWorthInserting(const ItemMetadata& item_metadata) const;
+    StorageResult<bool> IsItemWorthInserting(const ItemMetadata& item_metadata);
 
     StorageResult<void> FreeUpSpace(size_t required_space);
 
@@ -190,6 +199,11 @@ class CacheTier : public Storage::IStorage
     ItemMetadataContainer item_metadatas_;
     mutable std::recursive_mutex cache_mutex_;  ///< Mutex for cache operations
     CacheStats stats_;                          ///< Stats for this cache tier
+
+    /// Callback to notify the cache manager of a change in mapping
+    std::function<void(const fs::path&,
+                       const std::shared_ptr<CacheTier>&,
+                       bool)> mapping_cb_;
 
     //------------------------------------------------------------------------------//
     // Helpers
