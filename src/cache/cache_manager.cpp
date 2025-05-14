@@ -631,8 +631,9 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
     if (!free_up_space_res)
         return std::unexpected(free_up_space_res.error());
 
-    // Stream from origin to tier in 1‑MiB blocks to avoid giant vec
-    constexpr std::size_t kBlk = 1 << 20;
+    // Stream from origin to tier to avoid giant vec
+    constexpr std::size_t kBlk = Constants::READ_BUFFER_SIZE_BYTES;
+
     std::vector<std::byte> blk(kBlk);
     std::span<std::byte> blk_span{blk};
     size_t total_read = 0;
