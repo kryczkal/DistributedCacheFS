@@ -422,25 +422,76 @@ StorageResult<void> CacheTier::Shutdown()
         );
         return std::unexpected(make_error_code(StorageErrc::FileNotFound));
     }
-    // Clear all folder/files in the cache folder
-    fs::remove_all(cache_path, ec);
+
+    std::error_code current_op_ec;
+
+    if (!ec) {
+        if (fs::is_directory(cache_path, current_op_ec)) {
+            spdlog::debug("CacheTier::Shutdown(tier={}): Clearing contents of cache directory: {}", cache_definition_.tier, cache_path.string());
+            std::error_code item_iterator_ec;
+            for (const auto& entry : fs::directory_iterator(cache_path, item_iterator_ec)) {
+                if (item_iterator_ec) {
+                    spdlog::error("CacheTier::Shutdown(tier={}): Error iterating cache directory {}: {}",
+                                  cache_definition_.tier, cache_path.string(), item_iterator_ec.message());
+                    current_op_ec = item_iterator_ec;
+                    break; // Stop trying to clear if directory iteration fails
+                }
+                std::error_code remove_item_ec;
+                fs::remove_all(entry.path(), remove_item_ec); // Remove each item
+                if (remove_item_ec) {
+                    spdlog::error(
+                        "CacheTier::Shutdown(tier={}): Failed to remove item {} during cache cleanup: {}",
+                        cache_definition_.tier, entry.path().string(), remove_item_ec.message()
+                    );
+                    if (!current_op_ec) { // Store the first error encountered during item removal
+                        current_op_ec = remove_item_ec;
+                    }
+                    // Continue to attempt to remove other items
+                }
+            }
+            if (current_op_ec) { // If an error occurred during content clearing (iteration or item removal)
+                spdlog::error(
+                    "CacheTier::Shutdown(tier={}): Errors occurred while clearing contents of cache folder {}: {}",
+                    cache_definition_.tier, cache_path.string(), current_op_ec.message()
+                );
+            } else {
+                 spdlog::debug("CacheTier::Shutdown(tier={}): Successfully cleared contents of cache folder {}", cache_definition_.tier, cache_path.string());
+            }
+        } else if (current_op_ec) { // Error from fs::is_directory check itself
+            spdlog::error("CacheTier::Shutdown(tier={}): Failed to check if cache path {} is a directory: {}",
+                cache_definition_.tier, cache_path.string(), current_op_ec.message());
+        } else { // Not a directory (and no error from fs::is_directory), or fs::exists was false but no ec
+            spdlog::warn("CacheTier::Shutdown(tier={}): Cache path {} is not a directory (or didn't exist without error). Skipping content clearing.",
+                cache_definition_.tier, cache_path.string());
+        }
+    }
+    // If 'ec' was set by fs::exists, or 'current_op_ec' by subsequent operations, prioritize 'ec' then 'current_op_ec'.
+    if (!ec && current_op_ec) {
+        ec = current_op_ec;
+    }
+
+    auto storage_shutdown_result = storage_instance_->Shutdown();
+
     if (ec) {
-        spdlog::error(
-            "CacheTier::Shutdown(tier={}): Failed to clear cache folder: {}",
-            cache_definition_.tier, ec.message()
-        );
+        if (!storage_shutdown_result) {
+            spdlog::error("CacheTier::Shutdown(tier={}): storage_instance_->Shutdown() also failed: {}. Initial filesystem error was: {}",
+                          cache_definition_.tier, storage_shutdown_result.error().message(), ec.message());
+        } else {
+            spdlog::error("CacheTier::Shutdown(tier={}): Filesystem error occurred during cache_path processing: {}. storage_instance_ shutdown was successful.",
+                          cache_definition_.tier, ec.message());
+        }
         return std::unexpected(ec);
     }
 
-    auto result = storage_instance_->Shutdown();
-    if (result)
-        spdlog::trace("CacheTier::Shutdown(tier={}) -> Success");
-    else
-        spdlog::trace(
-            "CacheTier::Shutdown(tier={}) -> Error: {}", cache_definition_.tier,
-            result.error().message()
+    if (storage_shutdown_result) {
+        spdlog::trace("CacheTier::Shutdown(tier={}) -> Success (storage_instance shutdown successful, no fs errors)");
+    } else {
+        spdlog::error(
+            "CacheTier::Shutdown(tier={}): storage_instance_->Shutdown() failed: {}", cache_definition_.tier,
+            storage_shutdown_result.error().message()
         );
-    return result;
+    }
+    return storage_shutdown_result;
 }
 std::filesystem::path CacheTier::RelativeToAbsPath(const std::filesystem::path &fuse_path) const
 {
