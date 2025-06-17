@@ -489,6 +489,29 @@ StorageResult<void> LocalStorage::PunchHole(
     return {};
 }
 
+StorageResult<void> LocalStorage::Fsync(
+    const std::filesystem::path& relative_path, bool is_data_sync
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    const auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    int fd = ::open(full_path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+        return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+    }
+    FileDescriptorGuard fd_guard(fd);
+
+    int sync_result = is_data_sync ? ::fdatasync(fd) : ::fsync(fd);
+    if (sync_result == -1) {
+        return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+    }
+
+    return {};
+}
+
 StorageResult<bool> LocalStorage::CheckIfFileExists(const std::filesystem::path& relative_path
 ) const
 {
@@ -520,13 +543,13 @@ StorageResult<void> LocalStorage::CreateFile(
     if (ec)
         return std::unexpected(MapFilesystemError(ec, "create_file_parent"));
 
-    std::ofstream ofs(full_path, std::ios::binary | std::ios::trunc);
-    if (!ofs)
-        return std::unexpected(make_error_code(StorageErrc::IOError));
-    ofs.close();
-
-    if (::chmod(full_path.c_str(), mode) == -1)
+    // Use open() with O_CREAT to create if not exists, but not truncate.
+    // The mode is applied on creation, respecting the process umask.
+    int fd = ::open(full_path.c_str(), O_WRONLY | O_CREAT, mode);
+    if (fd < 0) {
         return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+    }
+    FileDescriptorGuard fd_guard(fd);
 
     return {};
 }

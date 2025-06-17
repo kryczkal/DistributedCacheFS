@@ -374,6 +374,29 @@ StorageResult<void> CacheManager::CreateHardLink(const fs::path& from_path, cons
     return link_res;
 }
 
+StorageResult<void> CacheManager::Fsync(const fs::path& fuse_path, bool is_data_sync)
+{
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
+
+    auto attr_res = origin_->GetAttributes(fuse_path);
+    if (!attr_res) {
+        return std::unexpected(attr_res.error());
+    }
+    FileId file_id{attr_res->st_dev, attr_res->st_ino};
+
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+        for (const auto& tier : it->second) {
+            if (tier->GetItemMetadata(file_id)) {
+                auto res = tier->GetStorage()->Fsync(fuse_path, is_data_sync);
+                if (!res) return res;
+            }
+        }
+    }
+
+    return origin_->Fsync(fuse_path, is_data_sync);
+}
+
 StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, mode_t mode)
 {
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
@@ -431,6 +454,11 @@ StorageResult<void> CacheManager::RemoveXattr(const fs::path& fuse_path, const s
 StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_path)
 {
     return origin_->GetFilesystemStats(fuse_path.string());
+}
+
+std::shared_ptr<std::mutex> CacheManager::GetFileLock(const fs::path& path)
+{
+    return file_lock_manager_->GetFileLock(path);
 }
 
 void CacheManager::CacheRegionAsync(

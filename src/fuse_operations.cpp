@@ -262,31 +262,54 @@ int open(const char *path, struct fuse_file_info *fi)
     if (!manager)
         return -EIO;
 
-    const int oflags = fi->flags;
     auto fuse_path   = FuseOps::get_fuse_path(path);
+    const int oflags = fi->flags;
 
-    // O_CREAT handling
-    if (oflags & O_CREAT) {
-        // Fast path: try to create; we ignore EEXIST here and handle later.
-        mode_t create_mode = 0644;
-        (void)manager->CreateFile(fuse_path, create_mode);  // ignore result for now
-    }
+    // Acquire a per-path lock to ensure atomic handling of create/check operations.
+    auto file_mutex = manager->GetFileLock(fuse_path);
+    std::lock_guard lock(*file_mutex);
 
-    // stat the (possibly-new) object
     auto attr_res = manager->GetAttributes(fuse_path);
-    if (!attr_res) {
-        int err = Storage::StorageResultToErrno(attr_res);
-        if ((oflags & O_CREAT) && err == -ENOENT)
-            return -EIO;  // create failed mysteriously
-        return err;
+
+    // Case 1: Path exists.
+    if (attr_res.has_value()) {
+        if ((oflags & O_CREAT) && (oflags & O_EXCL)) {
+            return -EEXIST;
+        }
     }
+    // Case 2: Path does not exist.
+    else {
+        // If the error is anything other than "not found", it's a real problem.
+        if (attr_res.error() != make_error_code(Storage::StorageErrc::FileNotFound)) {
+            return Storage::StorageResultToErrno(attr_res);
+        }
+
+        if (oflags & O_CREAT) {
+            // It doesn't exist, so we are clear to create it.
+            // A default mode for new files. FUSE doesn't provide one in open().
+            mode_t create_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
+            auto create_res = manager->CreateFile(fuse_path, create_mode);
+            if (!create_res) {
+                return Storage::StorageResultToErrno(create_res);
+            }
+            // Re-fetch attributes for subsequent checks.
+            attr_res = manager->GetAttributes(fuse_path);
+            if (!attr_res) {
+                spdlog::error(
+                    "FUSE open: created file '{}' but failed to stat it immediately.",
+                    fuse_path.string()
+                );
+                return -EIO;
+            }
+        } else {
+            // It doesn't exist, and we were not asked to create it.
+            return -ENOENT;
+        }
+    }
+
     const struct stat &st = attr_res.value();
 
-    // exclusivity check
-    if ((oflags & O_CREAT) && (oflags & O_EXCL))
-        return -EEXIST;  // file now exists
-
-    // permission checks
+    // Permission checks
     int req = 0;
     switch (oflags & O_ACCMODE) {
         case O_RDONLY:
@@ -373,8 +396,6 @@ int statfs(const char *path, struct statvfs *stbuf)
     if (!manager)
         return -EIO;
 
-    // Delegate primarily to the manager
-    // Currently only supports "/", proxies to origin
     auto fuse_path = FuseOps::get_fuse_path(path);
     auto result    = manager->GetFilesystemStats(fuse_path);
     if (!result) {
@@ -385,11 +406,12 @@ int statfs(const char *path, struct statvfs *stbuf)
     return 0;
 }
 
-// TODO: Implement flush, release, fsync if needed for specific behaviors
 int flush(const char *path, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE flush called for path: {}", path);
-    // TODO: Implement logic to flush data to origin
+    // This is typically a no-op unless you're implementing write-back caching
+    // and need to flush internal buffers. Our current model is write-through
+    // for modifications, so this is not strictly necessary.
     return 0;
 }
 
@@ -402,9 +424,13 @@ int release(const char *path, struct fuse_file_info * /*fi*/)
 int fsync(const char *path, int isdatasync, struct fuse_file_info * /*fi*/)
 {
     spdlog::trace("FUSE fsync called for path: {}, isdatasync={}", path, isdatasync);
-    // TODO: Propagate fsync to origin/cache tiers
-    spdlog::warn("FUSE fsync called, but currently a no-op.");
-    return 0;
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = manager->Fsync(fuse_path, isdatasync != 0);
+    return Storage::StorageResultToErrno(result);
 }
 
 int setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
@@ -457,11 +483,9 @@ int removexattr(const char *path, const char *name)
     return Storage::StorageResultToErrno(result);
 }
 
-// opendir/releasedir - Minimal Implementation
 int opendir(const char *path, struct fuse_file_info *fi)
 {
     spdlog::trace("FUSE opendir called for {}", path);
-    // Check if directory exists using GetAttributes
     Cache::CacheManager *manager = FuseOps::get_coordinator();
     if (!manager)
         return -EIO;
@@ -504,7 +528,6 @@ int fsyncdir(const char *path, int isdatasync, struct fuse_file_info * /*fi*/)
     return 0;
 }
 
-// Function to populate the fuse_operations struct
 fuse_operations get_fuse_operations()
 {
     fuse_operations ops = {};

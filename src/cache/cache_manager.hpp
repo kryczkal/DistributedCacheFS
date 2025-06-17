@@ -73,6 +73,7 @@ class CacheManager
         std::filesystem::path& from_fuse_path, std::filesystem::path& to_fuse_path
     );
     StorageResult<void> CreateHardLink(const fs::path& from_path, const fs::path& to_path);
+    StorageResult<void> Fsync(const fs::path& fuse_path, bool is_data_sync);
 
     StorageResult<struct statvfs> GetFilesystemStats(fs::path& fuse_path);
     StorageResult<void> SetPermissions(const fs::path& fuse_path, mode_t mode);
@@ -89,6 +90,8 @@ class CacheManager
     );
     StorageResult<ssize_t> ListXattr(const fs::path& fuse_path, char* list, size_t size);
     StorageResult<void> RemoveXattr(const fs::path& fuse_path, const std::string& name);
+
+    std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
 
     private:
     void CacheRegionAsync(

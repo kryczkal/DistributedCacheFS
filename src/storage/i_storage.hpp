@@ -53,6 +53,10 @@ class IStorage
         const std::filesystem::path& relative_path, off_t offset, size_t size
     ) = 0;
 
+    virtual StorageResult<void> Fsync(
+        const std::filesystem::path& relative_path, bool is_data_sync
+    ) = 0;
+
     virtual StorageResult<bool> CheckIfFileExists(const std::filesystem::path& relative_path
     ) const = 0;
 
