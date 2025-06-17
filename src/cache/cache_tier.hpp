@@ -82,7 +82,7 @@ class CacheTier
     const Config::CacheDefinition cache_definition_;
     std::unique_ptr<Storage::IStorage> storage_instance_;
     std::unique_ptr<BlockManager> block_manager_;
-    const fs::path journal_path_;
+    fs::path journal_path_;
     CacheStats stats_;
     mutable std::atomic<size_t> read_hit_counter_{0};
 };

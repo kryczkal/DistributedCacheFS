@@ -61,13 +61,24 @@ void AsyncIoManager::SubmitTask(std::function<void()>&& task)
 
 std::future<AsyncIoManager::ReadResult> AsyncIoManager::SubmitRead(
     std::shared_ptr<Storage::IStorage> storage, std::filesystem::path path, off_t offset,
-    std::span<std::byte> buffer
+    size_t bytes_to_read
 )
 {
-    auto task_ptr = std::make_shared<std::packaged_task<ReadResult()>>([storage, path, offset,
-                                                                        buffer]() mutable {
-        return storage->Read(path, offset, buffer);
-    });
+    auto task_ptr =
+        std::make_shared<std::packaged_task<ReadResult()>>([storage, path, offset,
+                                                            bytes_to_read]() mutable {
+            std::vector<std::byte> data_buffer(bytes_to_read);
+            std::span<std::byte> buffer_span{data_buffer};
+
+            Storage::StorageResult<size_t> read_res = storage->Read(path, offset, buffer_span);
+
+            if (!read_res) {
+                return std::unexpected(read_res.error());
+            }
+
+            data_buffer.resize(*read_res);
+            return data_buffer;
+        });
 
     std::future<ReadResult> future = task_ptr->get_future();
 

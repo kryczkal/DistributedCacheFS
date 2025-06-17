@@ -24,11 +24,11 @@ class AsyncIoManager
     AsyncIoManager(const AsyncIoManager&)            = delete;
     AsyncIoManager& operator=(const AsyncIoManager&) = delete;
 
-    using ReadResult = Storage::StorageResult<size_t>;
+    using ReadResult = Storage::StorageResult<std::vector<std::byte>>;
 
     std::future<ReadResult> SubmitRead(
         std::shared_ptr<Storage::IStorage> storage, std::filesystem::path path, off_t offset,
-        std::span<std::byte> buffer
+        size_t bytes_to_read
     );
 
     void SubmitTask(std::function<void()>&& task);

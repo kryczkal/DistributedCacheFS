@@ -50,7 +50,7 @@ class CacheManager
     StorageResult<void> InitializeAll();
     StorageResult<void> ShutdownAll();
 
-    StorageResult<struct stat> GetAttributes(std::filesystem::path& fuse_path);
+    StorageResult<struct stat> GetAttributes(const std::filesystem::path& fuse_path);
 
     StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
         const std::filesystem::path& fuse_path

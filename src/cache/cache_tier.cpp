@@ -24,6 +24,7 @@ CacheTier::CacheTier(const Config::CacheDefinition& cache_definition)
         );
     }
     storage_instance_ = std::move(res.value());
+    journal_path_     = storage_instance_->GetPath() / ".dcachefs_rename_journal.log";
 }
 
 CacheTier::~CacheTier() = default;

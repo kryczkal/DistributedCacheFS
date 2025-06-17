@@ -80,7 +80,7 @@ StorageResult<void> CacheManager::ShutdownAll()
     return {};
 }
 
-StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fuse_path)
+StorageResult<struct stat> CacheManager::GetAttributes(const std::filesystem::path& fuse_path)
 {
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
@@ -167,25 +167,33 @@ StorageResult<size_t> CacheManager::ReadFile(
             tier_to_cache_.rbegin()->second.front()->GetStats().IncrementMisses();
         }
 
-        std::vector<std::future<StorageResult<size_t>>> futures;
+        std::vector<std::future<Storage::StorageResult<std::vector<std::byte>>>> futures;
+        futures.reserve(missing_regions.size());
         for (const auto& region : missing_regions) {
-            off_t buffer_start_at = region.first - offset;
-            std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, region.second};
             futures.push_back(
-                io_manager_->SubmitRead(origin_, fuse_path, region.first, sub_buffer)
+                io_manager_->SubmitRead(origin_, fuse_path, region.first, region.second)
             );
         }
+
         for (size_t i = 0; i < futures.size(); ++i) {
             auto start_time = std::chrono::steady_clock::now();
             auto res        = futures[i].get();
             auto end_time   = std::chrono::steady_clock::now();
 
             if (res) {
-                bytes_from_origin += *res;
-                size_t bytes_actually_read = *res;
+                const auto& read_data       = *res;
+                size_t bytes_actually_read  = read_data.size();
+                off_t region_offset         = missing_regions[i].first;
+                off_t buffer_start_at       = region_offset - offset;
 
                 if (bytes_actually_read > 0) {
-                    off_t region_offset  = missing_regions[i].first;
+                    std::copy(
+                        read_data.begin(), read_data.end(), buffer.data() + buffer_start_at
+                    );
+                }
+                bytes_from_origin += bytes_actually_read;
+
+                if (bytes_actually_read > 0) {
                     double fetch_cost_ms = std::max(
                         1.0,
                         static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -194,14 +202,8 @@ StorageResult<size_t> CacheManager::ReadFile(
                                                 .count())
                     );
 
-                    off_t buffer_start_at = region_offset - offset;
-                    std::vector<std::byte> data_to_cache(bytes_actually_read);
-                    std::copy_n(
-                        buffer.data() + buffer_start_at, bytes_actually_read, data_to_cache.begin()
-                    );
-
                     io_manager_->SubmitTask([this, file_id, fuse_path, region_offset,
-                                             data_to_cache = std::move(data_to_cache),
+                                             data_to_cache = std::move(*res),
                                              fetch_cost_ms]() mutable {
                         this->CacheRegionAsync(
                             file_id, fuse_path, region_offset, std::move(data_to_cache),
@@ -608,7 +610,7 @@ StorageResult<void> CacheManager::CheckPermissions(
     const fs::path& fuse_path, int access_mask, uid_t caller_uid, gid_t caller_gid
 )
 {
-    auto attr_res = this->GetAttributes(const_cast<fs::path&>(fuse_path));
+    auto attr_res = this->GetAttributes(fuse_path);
     if (!attr_res) {
         return std::unexpected(attr_res.error());
     }
