@@ -23,6 +23,9 @@ namespace DistributedCacheFS::Cache
 using namespace Storage;
 using namespace Config;
 
+//------------------------------------------------------------------------------//
+// Class Creation and Destruction
+//------------------------------------------------------------------------------//
 CacheManager::CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin)
     : config_(config), origin_(std::move(origin))
 {
@@ -44,13 +47,19 @@ CacheManager::~CacheManager()
     tier_to_cache_.clear();
 }
 
+//------------------------------------------------------------------------------//
+// Public Methods
+//------------------------------------------------------------------------------//
+
 StorageResult<void> CacheManager::InitializeAll()
 {
     spdlog::debug("CacheManager::InitializeAll()");
     spdlog::info("Initializing CacheManager...");
 
-    if (auto res = origin_->Initialize(); !res)
+    if (auto res = origin_->Initialize(); !res) {
+        spdlog::error("Failed to initialize origin storage: {}", res.error().message());
         return std::unexpected(res.error());
+    }
 
     {
         std::unique_lock lock_tiers(tier_mutex_);
@@ -59,8 +68,10 @@ StorageResult<void> CacheManager::InitializeAll()
 
         for (const auto& cache_definition : config_.cache_definitions) {
             auto cache_instance = std::make_shared<CacheTier>(cache_definition);
-            if (auto res = cache_instance->Initialize(); !res)
+            if (auto res = cache_instance->Initialize(); !res) {
+                spdlog::error("Failed to initialize cache tier {}: {}", cache_definition.tier, res.error().message());
                 return std::unexpected(res.error());
+            }
             
             cache_instance->SetMappingCallback(
                 [this](const fs::path& p,
@@ -92,7 +103,6 @@ StorageResult<void> CacheManager::ShutdownAll()
     spdlog::info("Shutting down CacheManager ...");
     std::error_code first_error;
 
-    // Shutdown Cache Tiers
     for (auto& [tier, cache_tiers] : tier_to_cache_) {
         for (const auto& cache_tier : cache_tiers) {
             spdlog::info("Shutting down cache tier {}...", tier);
@@ -110,7 +120,6 @@ StorageResult<void> CacheManager::ShutdownAll()
     tier_to_cache_.clear();
     file_to_cache_.clear();
 
-    // Shutdown Origin
     spdlog::info("Shutting down origin...");
     {
         if (auto res = origin_->Shutdown(); !res) {
@@ -122,9 +131,7 @@ StorageResult<void> CacheManager::ShutdownAll()
     }
 
     if (first_error) {
-        spdlog::error(
-            "Cache Coordinator shutdown completed with errors: {}", first_error.message()
-        );
+        spdlog::error("Cache Manager shutdown completed with errors: {}", first_error.message());
         return std::unexpected(first_error);
     }
 
@@ -132,21 +139,21 @@ StorageResult<void> CacheManager::ShutdownAll()
     return {};
 }
 
-// Core FUSE Operation Implementations
-
 StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fuse_path)
 {
     spdlog::debug("CacheManager::GetAttributes({})", fuse_path.string());
     if (fuse_path.empty()) {
+        spdlog::warn("GetAttributes failed: empty path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
     auto origin_stat_res = origin_->GetAttributes(fuse_path);
-    if (!origin_stat_res)
+    if (!origin_stat_res) {
+        spdlog::warn("GetAttributes failed for '{}': {}", fuse_path.string(), origin_stat_res.error().message());
         return std::unexpected(origin_stat_res.error());
+    }
     struct stat origin_stat = origin_stat_res.value();
 
-    // validate (or evict) existing cache entry
     std::shared_ptr<CacheTier> cache_tier;
     {
         std::shared_lock meta_rlock(metadata_mutex_);
@@ -159,31 +166,30 @@ StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fu
         CoherencyMetadata origin_meta{origin_stat.st_mtime, origin_stat.st_size};
         auto valid_res = cache_tier->IsCacheItemValid(fuse_path, origin_meta);
         if (!valid_res || !valid_res.value()) {
-            RemoveMetadataInvalidateCache(fuse_path, cache_tier);  // ignore error, best‑effort
+            if (!valid_res) {
+                 spdlog::warn("IsCacheItemValid failed for '{}': {}", fuse_path.string(), valid_res.error().message());
+            }
+            RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         }
     }
-
-    spdlog::trace(
-        "CacheManager::GetAttributes -> Success (st_mode={:o}, st_size={})", origin_stat.st_mode,
-        origin_stat.st_size
-    );
+    
+    spdlog::trace("CacheManager::GetAttributes -> Success");
     return origin_stat;
 }
+
 StorageResult<std::vector<std::pair<std::string, struct stat>>> CacheManager::ListDirectory(
     const std::filesystem::path& fuse_path
 )
 {
     spdlog::debug("CacheManager::ListDirectory({})", fuse_path.string());
     if (fuse_path.empty()) {
+        spdlog::warn("ListDirectory failed: empty path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
-
-    // Always fetch from origin
     auto result = origin_->ListDirectory(fuse_path);
-    if (result)
-        spdlog::trace("CacheManager::ListDirectory -> {} entries", result.value().size());
-    else
-        spdlog::trace("CacheManager::ListDirectory -> Error: {}", result.error().message());
+    if (!result) {
+        spdlog::warn("ListDirectory failed for '{}': {}", fuse_path.string(), result.error().message());
+    }
     return result;
 }
 
@@ -192,10 +198,11 @@ StorageResult<size_t> CacheManager::ReadFile(
 )
 {
     spdlog::debug("CacheManager::ReadFile({}, {}, {})", fuse_path.string(), offset, buffer.size());
-    if (fuse_path.empty() || fuse_path == ".")
+    if (fuse_path.empty() || fuse_path == ".") {
+        spdlog::warn("ReadFile failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
 
-    // fast path : cached hit
     std::shared_ptr<CacheTier> cache_tier;
     {
         std::shared_lock meta_rlock(metadata_mutex_);
@@ -206,25 +213,23 @@ StorageResult<size_t> CacheManager::ReadFile(
 
     if (cache_tier) {
         auto meta_res = GetOriginCoherencyMetadata(fuse_path);
-        if (!meta_res)
+        if (!meta_res) {
+            spdlog::warn("ReadFile failed for '{}': could not get origin metadata: {}", fuse_path.string(), meta_res.error().message());
             return std::unexpected(meta_res.error());
+        }
 
         auto hit = cache_tier->ReadItemIfCacheValid(fuse_path, offset, buffer, meta_res.value());
-        if (!hit)
+        if (!hit) {
+            spdlog::warn("ReadFile failed for '{}': ReadItemIfCacheValid error: {}", fuse_path.string(), hit.error().message());
             return std::unexpected(hit.error());
-        if (hit->first) {               // cache hit
-            TryPromoteItem(fuse_path);  // background promotion
+        }
+        if (hit->first) {
+            TryPromoteItem(fuse_path);
             return hit->second;
         }
     }
 
-    // miss → fetch & (maybe) cache
-    auto result = FetchAndTryCache(fuse_path, offset, buffer);
-    if (result)
-        spdlog::trace("CacheManager::ReadFile -> {} bytes read from origin/cache", *result);
-    else
-        spdlog::trace("CacheManager::ReadFile -> Error: {}", result.error().message());
-    return result;
+    return FetchAndTryCache(fuse_path, offset, buffer);
 }
 
 StorageResult<size_t> CacheManager::WriteFile(
@@ -233,40 +238,27 @@ StorageResult<size_t> CacheManager::WriteFile(
 {
     spdlog::debug("CacheManager::WriteFile({}, {}, {})", fuse_path.string(), offset, data.size());
     if (fuse_path.empty() || fuse_path == ".") {
+        spdlog::warn("WriteFile failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    // Write-Through Policy;
-
-    spdlog::trace("CacheManager::WriteFile: Writing to origin for {}", fuse_path.string());
-    size_t bytes_written = 0;
-    {
-        auto res = origin_->Write(fuse_path, offset, data);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::WriteFile: Origin write failed for {}: {}", fuse_path.string(),
-                res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
-        bytes_written = res.value();
+    auto res = origin_->Write(fuse_path, offset, data);
+    if (!res) {
+        spdlog::error("WriteFile failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
+        return std::unexpected(res.error());
     }
+    size_t bytes_written = res.value();
 
-    // Check if cache exists then invalidate it
     auto cache_tier_it = file_to_cache_.find(fuse_path);
     if (cache_tier_it != file_to_cache_.end()) {
         auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::WriteFile: Failed to invalidate cache entry for {}: {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
+        auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!inv_res) {
+            spdlog::error("Failed to invalidate cache on write for {}: {}", fuse_path.string(), inv_res.error().message());
+            return std::unexpected(inv_res.error());
         }
     }
 
-    spdlog::trace("CacheManager::WriteFile -> {} bytes written", bytes_written);
     return bytes_written;
 }
 
@@ -274,35 +266,21 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
 {
     spdlog::debug("CacheManager::CreateFile({}, {:o})", fuse_path.string(), mode);
     if (fuse_path.empty() || fuse_path == ".") {
+        spdlog::warn("CreateFile failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    // Write-Through Policy
-    {
-        auto res = origin_->CreateFile(fuse_path, mode);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::CreateFile: Origin create failed for {}: {}", fuse_path.string(),
-                res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+    auto res = origin_->CreateFile(fuse_path, mode);
+    if (!res) {
+        spdlog::error("CreateFile failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
+        return std::unexpected(res.error());
     }
 
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path);
-        cache_tier_it != file_to_cache_.end()) {
+    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
         auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::CreateFile: Failed to invalidate cache entry for {}: {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+        auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!inv_res) return std::unexpected(inv_res.error());
     }
-
-    spdlog::trace("CacheManager::CreateFile -> Success");
     return {};
 }
 
@@ -310,35 +288,21 @@ StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_pa
 {
     spdlog::debug("CacheManager::CreateDirectory({}, {:o})", fuse_path.string(), mode);
     if (fuse_path.empty() || fuse_path == ".") {
+        spdlog::warn("CreateDirectory failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    // Write-Through Policy
-    {
-        auto res = origin_->CreateDirectory(fuse_path, mode);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::CreateDirectory: Origin create failed for {}: {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+    auto res = origin_->CreateDirectory(fuse_path, mode);
+    if (!res) {
+        spdlog::error("CreateDirectory failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
+        return std::unexpected(res.error());
     }
-
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path);
-        cache_tier_it != file_to_cache_.end()) {
+    
+    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
         auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::CreateDirectory: Failed to invalidate cache entry for {}: {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+        auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!inv_res) return std::unexpected(inv_res.error());
     }
-
-    spdlog::trace("CacheManager::CreateDirectory -> Success");
     return {};
 }
 
@@ -346,75 +310,43 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 {
     spdlog::debug("CacheManager::Remove({})", fuse_path.string());
     if (fuse_path.empty() || fuse_path == ".") {
+        spdlog::warn("Remove failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    // Write-Through Policy
-    {
-        auto res = origin_->Remove(fuse_path);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::Remove: Origin remove failed for {}: {}", fuse_path.string(),
-                res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+    auto res = origin_->Remove(fuse_path);
+    if (!res) {
+        spdlog::error("Remove failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
+        return std::unexpected(res.error());
     }
 
-    // Origin remove succeeded, remove from all cache tiers.
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path);
-        cache_tier_it != file_to_cache_.end()) {
+    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
         auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::Remove: Failed to invalidate cache entry for {}: {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+        auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!inv_res) return std::unexpected(inv_res.error());
     }
-
-    spdlog::trace("CacheManager::Remove -> Success");
     return {};
 }
 
 StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path, off_t size)
 {
     spdlog::debug("CacheManager::TruncateFile({}, {})", fuse_path.string(), size);
-    if (fuse_path.empty() || fuse_path == ".") {
+    if (fuse_path.empty() || fuse_path == "." || size < 0) {
+        spdlog::warn("TruncateFile failed: invalid path or size.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
-    if (size < 0) {
-        return std::unexpected(make_error_code(StorageErrc::InvalidOffset));
+    
+    auto res = origin_->Truncate(fuse_path, size);
+    if (!res) {
+        spdlog::error("TruncateFile failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
+        return std::unexpected(res.error());
     }
 
-    // Write-Through Policy
-    {
-        auto res = origin_->Truncate(fuse_path, size);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::TruncateFile: Origin truncate failed for {}: {}", fuse_path.string(),
-                res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
-    }
-
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path);
-        cache_tier_it != file_to_cache_.end()) {
+    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
         auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::TruncateFile: Failed to invalidate cache entry for {}: {}",
-                fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+        auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+        if (!inv_res) return std::unexpected(inv_res.error());
     }
-
-    spdlog::trace("CacheManager::TruncateFile -> Success");
     return {};
 }
 
@@ -423,50 +355,27 @@ StorageResult<void> CacheManager::Move(
 )
 {
     spdlog::debug("CacheManager::Move({}, {})", from_fuse_path.string(), to_fuse_path.string());
-    if (from_fuse_path.empty() || from_fuse_path == "." || to_fuse_path.empty() ||
-        to_fuse_path == ".") {
+    if (from_fuse_path.empty() || to_fuse_path.empty()) {
+        spdlog::warn("Move failed: invalid 'from' or 'to' path.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    // Write-Through Policy
-    {
-        auto res = origin_->Move(from_fuse_path, to_fuse_path);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::Move: Origin move failed for {} to {}: {}", from_fuse_path.string(),
-                to_fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+    auto res = origin_->Move(from_fuse_path, to_fuse_path);
+    if (!res) {
+        spdlog::error("Move failed for '{}'->'{}' at origin: {}", from_fuse_path.string(), to_fuse_path.string(), res.error().message());
+        return std::unexpected(res.error());
     }
 
-    if (auto cache_tier_it = file_to_cache_.find(from_fuse_path);
-        cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(from_fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::Move: Failed to invalidate cache entry for {}: {}",
-                from_fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+    if (auto it = file_to_cache_.find(from_fuse_path); it != file_to_cache_.end()) {
+        auto inv_res = RemoveMetadataInvalidateCache(from_fuse_path, it->second);
+        if (!inv_res) return std::unexpected(inv_res.error());
     }
 
-    if (auto cache_tier_it = file_to_cache_.find(to_fuse_path);
-        cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
-        auto res         = RemoveMetadataInvalidateCache(to_fuse_path, cache_tier);
-        if (!res) {
-            spdlog::error(
-                "CacheManager::Move: Failed to invalidate cache entry for {}: {}",
-                to_fuse_path.string(), res.error().message()
-            );
-            return std::unexpected(res.error());
-        }
+    if (auto it = file_to_cache_.find(to_fuse_path); it != file_to_cache_.end()) {
+        auto inv_res = RemoveMetadataInvalidateCache(to_fuse_path, it->second);
+        if (!inv_res) return std::unexpected(inv_res.error());
     }
 
-    spdlog::trace("CacheManager::Move -> Success");
     return {};
 }
 
@@ -476,11 +385,7 @@ StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_pa
     if (fuse_path.empty()) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
-
-    spdlog::warn("CacheManager::GetFilesystemStats not implemented", fuse_path.string());
-    // Do statvfs on the origin path
     struct statvfs origin_statvfs = {};
-    spdlog::trace("CacheManager::GetFilesystemStats -> Success (dummy data)");
     return origin_statvfs;
 }
 
@@ -488,46 +393,22 @@ StorageResult<void> CacheManager::SetPermissions(const fs::path& fuse_path, mode
 {
     spdlog::debug("CacheManager::SetPermissions({}, {:o})", fuse_path.string(), mode);
     if (fuse_path.empty()) {
+        spdlog::warn("SetPermissions failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
-    // Change permissions on origin
     auto origin_res = origin_->SetPermissions(fuse_path, mode);
     if (!origin_res) {
-        spdlog::error(
-            "CacheManager::SetPermissions: Origin SetPermissions failed for {}: {}",
-            fuse_path.string(), origin_res.error().message()
-        );
+        spdlog::error("SetPermissions failed for '{}' at origin: {}", fuse_path.string(), origin_res.error().message());
         return std::unexpected(origin_res.error());
     }
 
-    // Invalidate cache entry if it exists
-    std::shared_ptr<CacheTier> cache_tier;
-    {
-        std::shared_lock meta_rlock(metadata_mutex_);  // Read lock to find
-        auto it = file_to_cache_.find(fuse_path);
-        if (it != file_to_cache_.end()) {
-            cache_tier = it->second;
-        }
-    }
-
-    if (cache_tier) {
-        spdlog::trace(
-            "CacheManager::SetPermissions: Invalidating cache for {} on tier {}",
-            fuse_path.string(), cache_tier->GetTier()
-        );
-        // RemoveMetadataInvalidateCache acquires its own write lock on metadata_mutex_
-        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+    if (auto it = file_to_cache_.find(fuse_path); it != file_to_cache_.end()) {
+        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, it->second);
         if (!invalidation_res) {
-            spdlog::warn(
-                "CacheManager::SetPermissions: Failed to invalidate cache entry for {}: {}. "
-                "Proceeding, but cache might be stale.",
-                fuse_path.string(), invalidation_res.error().message()
-            );
+            spdlog::warn("SetPermissions: Failed to invalidate cache entry for {}: {}", fuse_path.string(), invalidation_res.error().message());
         }
     }
-
-    spdlog::trace("CacheManager::SetPermissions -> Success for {}", fuse_path.string());
     return {};
 }
 
@@ -535,317 +416,226 @@ StorageResult<void> CacheManager::SetOwner(const fs::path& fuse_path, uid_t uid,
 {
     spdlog::debug("CacheManager::SetOwner({}, uid={}, gid={})", fuse_path.string(), uid, gid);
     if (fuse_path.empty()) {
+        spdlog::warn("SetOwner failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
-
-    // Change owner on origin
+    
     auto origin_res = origin_->SetOwner(fuse_path, uid, gid);
     if (!origin_res) {
-        spdlog::error(
-            "CacheManager::SetOwner: Origin SetOwner failed for {}: {}", fuse_path.string(),
-            origin_res.error().message()
-        );
+        spdlog::error("SetOwner failed for '{}' at origin: {}", fuse_path.string(), origin_res.error().message());
         return std::unexpected(origin_res.error());
     }
 
-    // Invalidate cache entry if it exists
-    std::shared_ptr<CacheTier> cache_tier;
-    {
-        std::shared_lock meta_rlock(metadata_mutex_);  // Read lock to find
-        auto it = file_to_cache_.find(fuse_path);
-        if (it != file_to_cache_.end()) {
-            cache_tier = it->second;
-        }
-    }
-
-    if (cache_tier) {
-        spdlog::trace(
-            "CacheManager::SetOwner: Invalidating cache for {} on tier {}", fuse_path.string(),
-            cache_tier->GetTier()
-        );
-        // RemoveMetadataInvalidateCache acquires its own write lock on metadata_mutex_
-        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
+    if (auto it = file_to_cache_.find(fuse_path); it != file_to_cache_.end()) {
+        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, it->second);
         if (!invalidation_res) {
-            spdlog::warn(
-                "CacheManager::SetOwner: Failed to invalidate cache entry for {}: {}. "
-                "Proceeding, but cache might be stale.",
-                fuse_path.string(), invalidation_res.error().message()
-            );
+            spdlog::warn("SetOwner: Failed to invalidate cache entry for {}: {}", fuse_path.string(), invalidation_res.error().message());
         }
     }
-
-    spdlog::trace("CacheManager::SetOwner -> Success for {}", fuse_path.string());
     return {};
 }
 
-// Private Cache Logic Helper Implementations
+//------------------------------------------------------------------------------//
+// Private Methods
+//------------------------------------------------------------------------------//
 
 StorageResult<size_t> CacheManager::FetchAndTryCache(
     fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer
 )
 {
-    spdlog::debug(
-        "CacheManager::FetchAndTryCache({}, {}, {})", fuse_path.string(), offset, buffer.size()
-    );
-    if (offset < 0)
-        return std::unexpected(make_error_code(StorageErrc::InvalidOffset));
-    if (fuse_path.empty() || fuse_path == ".") {
+    spdlog::debug("CacheManager::FetchAndTryCache({})", fuse_path.string());
+    if (offset < 0 || fuse_path.empty()) {
+        spdlog::warn("FetchAndTryCache failed: invalid path or offset.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
     auto origin_attr = origin_->GetAttributes(fuse_path);
-    if (!origin_attr)
+    if (!origin_attr) {
+        spdlog::error("FetchAndTryCache failed to get origin attributes for '{}': {}", fuse_path.string(), origin_attr.error().message());
         return std::unexpected(origin_attr.error());
-    const size_t origin_size = static_cast<size_t>(origin_attr->st_size);
+    }
 
-    // Satisfy caller first (single read)
-    auto now      = std::chrono::system_clock::now();
+    auto now = std::chrono::system_clock::now();
     auto read_res = origin_->Read(fuse_path, offset, buffer);
-    auto elapsed  = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now() - now
-    );
-    if (!read_res)
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - now);
+    if (!read_res) {
+        spdlog::error("FetchAndTryCache failed to read from origin for '{}': {}", fuse_path.string(), read_res.error().message());
         return std::unexpected(read_res.error());
+    }
+    
     const size_t bytes_for_caller = *read_res;
-
-    // Pick tier; if none, we are done
-
-    const auto fetch_cost_ms = static_cast<double>(elapsed.count()) > 0.0
-                                   ? static_cast<double>(elapsed.count())
-                                   : 1.0;  // avoid zero
+    const double fetch_cost_ms = static_cast<double>(elapsed.count()) > 0.0 ? static_cast<double>(elapsed.count()) : 1.0;
+    
     ItemMetadata meta{
         fuse_path,
         {0.0, fetch_cost_ms, std::time(nullptr)},
         {origin_attr->st_mtime, origin_attr->st_size}
     };
     meta.heat_metadata.heat = CacheTier::CalculateInitialItemHeat(fuse_path, meta);
-    auto tier_res           = SelectCacheTierForWrite(meta);
-    if (!tier_res)
+    
+    auto tier_res = SelectCacheTierForWrite(meta);
+    if (!tier_res) {
+        spdlog::error("FetchAndTryCache failed: SelectCacheTierForWrite error: {}", tier_res.error().message());
         return std::unexpected(tier_res.error());
+    }
     auto tier = tier_res.value();
-    if (!tier)
-        return bytes_for_caller;
+    if (!tier) return bytes_for_caller;
 
-    // Free up space in the tier
-    auto free_up_space_res = tier->FreeUpSpace(origin_size);
-    if (!free_up_space_res)
+    auto free_up_space_res = tier->FreeUpSpace(origin_attr->st_size);
+    if (!free_up_space_res) {
+        spdlog::error("FetchAndTryCache failed: FreeUpSpace error: {}", free_up_space_res.error().message());
         return std::unexpected(free_up_space_res.error());
+    }
 
-    // Stream from origin to tier in 1‑MiB blocks to avoid giant vec
     constexpr std::size_t kBlk = 1 << 20;
     std::vector<std::byte> blk(kBlk);
     std::span<std::byte> blk_span{blk};
     size_t total_read = 0;
-    while (total_read < origin_size) {
-        const size_t want = std::min(kBlk, origin_size - total_read);
-        blk_span          = {blk.data(), want};
-        auto r            = origin_->Read(fuse_path, static_cast<off_t>(total_read), blk_span);
-        if (!r)
+    while (total_read < static_cast<size_t>(origin_attr->st_size)) {
+        const size_t want = std::min(kBlk, static_cast<size_t>(origin_attr->st_size) - total_read);
+        blk_span = {blk.data(), want};
+        auto r = origin_->Read(fuse_path, static_cast<off_t>(total_read), blk_span);
+        if (!r) {
+            spdlog::error("FetchAndTryCache failed during origin read loop: {}", r.error().message());
             return std::unexpected(r.error());
-        if (*r == 0)
-            break;
+        }
+        if (*r == 0) break;
         std::span<std::byte> cblk{blk.data(), *r};
-        auto w = tier->storage_instance_->Write(fuse_path, static_cast<off_t>(total_read), cblk);
-        if (!w || *w != *r)
+        auto w = tier->GetStorage()->Write(fuse_path, static_cast<off_t>(total_read), cblk);
+        if (!w || *w != *r) {
+            spdlog::error("FetchAndTryCache failed during cache write loop: {}", w.error().message());
             return std::unexpected(make_error_code(StorageErrc::IOError));
+        }
         total_read += *r;
     }
 
     auto insert_meta_res = tier->InsertItemMetadata(meta);
     if (!insert_meta_res) {
-        spdlog::error(
-            "CacheManager::FetchAndTryCache: Failed to insert item metadata: {}",
-            insert_meta_res.error().message()
-        );
+        spdlog::error("FetchAndTryCache failed to insert item metadata: {}", insert_meta_res.error().message());
         return std::unexpected(insert_meta_res.error());
     }
 
-    {
-        std::unique_lock w_lock(metadata_mutex_);
-        file_to_cache_[fuse_path] = tier;
-    }
-    spdlog::trace("CacheManager::FetchAndTryCache -> {} bytes for caller", bytes_for_caller);
+    std::unique_lock w_lock(metadata_mutex_);
+    file_to_cache_[fuse_path] = tier;
+    
     return bytes_for_caller;
 }
+
 StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
     const ItemMetadata& item_metadata
 )
 {
-    std::shared_lock tiers_rlock(tier_mutex_);  // hierarchy: tier_mutex_ before metadata_mutex_
-    spdlog::debug("CacheManager::SelectCacheTierForWrite({})", item_metadata.path.string());
+    std::shared_lock tiers_rlock(tier_mutex_);
     if (tier_to_cache_.empty()) {
-        spdlog::trace("CacheManager::SelectCacheTierForWrite -> No cache tiers, returning nullptr");
-        return nullptr;  // no cache at all
+        return nullptr;
     }
 
-    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {  // slowest first
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
         for (const auto& tier : it->second) {
             auto worth = tier->IsItemWorthInserting(item_metadata);
-            if (!worth)
-                return std::unexpected(worth.error());
-            if (*worth) {
-                spdlog::trace(
-                    "CacheManager::SelectCacheTierForWrite: Found cache tier {} for {}",
-                    tier->GetTier(), item_metadata.path.string()
-                );
-                spdlog::trace(
-                    "CacheManager::SelectCacheTierForWrite -> Selected tier {}", tier->GetTier()
-                );
-                return tier;  // first slow tier that accepts
-            }
+            if (!worth) return std::unexpected(worth.error());
+            if (*worth) return tier;
         }
     }
-    spdlog::trace(
-        "CacheManager::SelectCacheTierForWrite: No suitable cache tier found for {}. Returning "
-        "nullptr",
-        item_metadata.path.string()
-    );
-    return nullptr;  // nothing suitable
+    return nullptr;
 }
 
 StorageResult<void> CacheManager::RemoveMetadataInvalidateCache(
     const fs::path& fuse_path, const std::shared_ptr<CacheTier>& cache_tier
 )
 {
-    spdlog::debug(
-        "CacheManager::RemoveMetadataInvalidateCache({}, {})", fuse_path.string(),
-        cache_tier->GetTier()
-    );
+    spdlog::debug("CacheManager::RemoveMetadataInvalidateCache({})", fuse_path.string());
     if (!cache_tier) {
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
     auto res = cache_tier->InvalidateAndRemoveItem(fuse_path);
     if (!res) {
+        spdlog::error("RemoveMetadataInvalidateCache failed for '{}': {}", fuse_path.string(), res.error().message());
         return std::unexpected(res.error());
     }
     std::unique_lock lock(metadata_mutex_);
     file_to_cache_.erase(fuse_path);
-    spdlog::trace("CacheManager::RemoveMetadataInvalidateCache -> Success");
     return {};
 }
 
 StorageResult<void> CacheManager::TryPromoteItem(fs::path& fuse_path)
 {
-    spdlog::debug("CacheManager::TryPromoteItem({})", fuse_path.string());
-    if (fuse_path.empty())
+    if (fuse_path.empty()) {
+        spdlog::warn("TryPromoteItem failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
 
-    // snapshot current tier under metadata lock
     std::shared_ptr<CacheTier> current_tier;
     {
         std::shared_lock meta_rlock(metadata_mutex_);
         auto it = file_to_cache_.find(fuse_path);
-        if (it == file_to_cache_.end())
-            return {};
+        if (it == file_to_cache_.end()) return {};
         current_tier = it->second;
     }
-    const size_t current_level = current_tier->GetTier();
-    if (current_level == 0)  // already hottest tier
-        return {};
+    if (current_tier->GetTier() == 0) return {};
 
-    // collect faster tiers (lower tier index)
     std::vector<std::shared_ptr<CacheTier>> faster_tiers;
     {
         std::shared_lock tiers_rlock(tier_mutex_);
         for (const auto& [lvl, vec] : tier_to_cache_) {
-            if (lvl < current_level)
+            if (lvl < current_tier->GetTier())
                 faster_tiers.insert(faster_tiers.end(), vec.begin(), vec.end());
         }
     }
-    if (faster_tiers.empty())
-        return {};
+    if (faster_tiers.empty()) return {};
 
-    // fetch metadata & data once from current tier (under tier lock)
     auto meta_res = current_tier->GetItemMetadata(fuse_path);
-    if (!meta_res)
+    if (!meta_res) {
+        spdlog::warn("TryPromoteItem failed to get metadata for '{}' from tier {}: {}", fuse_path.string(), current_tier->GetTier(), meta_res.error().message());
         return std::unexpected(meta_res.error());
+    }
     const ItemMetadata meta = meta_res.value();
 
     std::vector<std::byte> buf(meta.coherency_metadata.size_bytes);
     std::span<std::byte> span{buf};
-    auto read_res = current_tier->storage_instance_->Read(fuse_path, 0, span);
-    if (!read_res || *read_res != span.size())
-        return std::unexpected(read_res ? make_error_code(StorageErrc::IOError) : read_res.error());
+    auto read_res = current_tier->GetStorage()->Read(fuse_path, 0, span);
+    if (!read_res || *read_res != span.size()) {
+        auto err = read_res ? make_error_code(StorageErrc::IOError) : read_res.error();
+        spdlog::warn("TryPromoteItem failed to read data for '{}' from tier {}: {}", fuse_path.string(), current_tier->GetTier(), err.message());
+        return std::unexpected(err);
+    }
 
-    // attempt promotion into the first tier that accepts it
     for (const auto& faster : faster_tiers) {
-        faster->RefreshRandomHeats(); // Update heats in the faster tier
+        faster->RefreshRandomHeats();
 
         auto worth = faster->IsItemWorthInserting(meta);
-        if (!worth) {
-            spdlog::error(
-                "CacheManager::TryPromoteItem: Error checking if item {} is worth inserting into "
-                "tier {}: {}",
-                meta.path.string(), faster->GetTier(), worth.error().message()
-            );
-            return std::unexpected(worth.error());
-        }
-        if (!*worth) {
-            spdlog::trace(
-                "CacheManager::TryPromoteItem: Item {} not worth inserting into faster tier {}. "
-                "Continuing to next faster tier if any.",
-                meta.path.string(), faster->GetTier()
-            );
-            continue; // Try next faster tier
-        }
+        if (!worth) return std::unexpected(worth.error());
+        if (!*worth) continue;
 
-        // Item is worth inserting, now try to cache it forcibly
         auto forcibly_res = faster->CacheItemForcibly(fuse_path, 0, span, meta);
         if (!forcibly_res) {
-            spdlog::error(
-                "CacheManager::TryPromoteItem: Failed to forcibly cache item {} to faster tier "
-                "{}: {}. Aborting promotion attempt.",
-                fuse_path.string(), faster->GetTier(), forcibly_res.error().message()
-            );
+            spdlog::error("Promotion failed during forcible cache to tier {}: {}", faster->GetTier(), forcibly_res.error().message());
             return std::unexpected(forcibly_res.error());
         }
 
-        // Promotion to this 'faster' tier was successful
-        spdlog::info(
-            "CacheManager::TryPromoteItem: Promoted item {} from tier {} to tier {}",
-            fuse_path.string(), current_level, faster->GetTier()
-        );
+        spdlog::info("Promoted item {} from tier {} to tier {}", fuse_path.string(), current_tier->GetTier(), faster->GetTier());
         {
             std::unique_lock meta_wlock(metadata_mutex_);
             file_to_cache_[fuse_path] = faster;
         }
         auto invalidate_res = current_tier->InvalidateAndRemoveItem(fuse_path);
         if (!invalidate_res) {
-            spdlog::warn(
-                "CacheManager::TryPromoteItem: Failed to invalidate/remove item {} from original "
-                "tier {} after promotion: {}. Continuing, but old cache entry might remain.",
-                fuse_path.string(), current_tier->GetTier(),
-                invalidate_res.error().message()
-            );
-            // This is a best-effort, so we don't return an error here.
+            spdlog::warn("Failed to remove item from original tier after promotion: {}", invalidate_res.error().message());
         }
         return {}; 
     }
 
-    // If loop completes, item was not promoted to any faster tier
-    spdlog::trace(
-        "CacheManager::TryPromoteItem: Item {} was not promoted (no suitable faster tier or not "
-        "worth it).",
-        fuse_path.string()
-    );
     return {};
 }
+
 StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(const fs::path& fuse_path
 ) const
 {
-    spdlog::debug("CacheManager::GetOriginMetadata({})", fuse_path.string());
     auto res = origin_->GetAttributes(fuse_path);
     if (!res) {
-        spdlog::error(
-            "CacheManager::GetOriginMetadata: Failed to get origin metadata for {}: {}",
-            fuse_path.string(), res.error().message()
-        );
+        spdlog::warn("GetOriginCoherencyMetadata failed for '{}': {}", fuse_path.string(), res.error().message());
         return std::unexpected(res.error());
     }
-    spdlog::trace(
-        "CacheManager::GetOriginCoherencyMetadata -> mtime={}, size={}", res.value().st_mtime,
-        res.value().st_size
-    );
     return CoherencyMetadata{res.value().st_mtime, res.value().st_size};
 }
 

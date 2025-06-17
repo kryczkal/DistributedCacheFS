@@ -11,6 +11,7 @@
 #include "boost/multi_index_container.hpp"
 
 #include <filesystem>
+#include <shared_mutex>
 
 #include "cache_stats.hpp"
 
@@ -23,7 +24,7 @@ namespace bmi = boost::multi_index;
 struct HeatMetadata {
     double heat;
     double fetch_cost_ms;
-    time_t last_access_time;  ///< Last accessed time
+    time_t last_access_time;
 };
 
 struct CoherencyMetadata {
@@ -37,7 +38,7 @@ struct ItemMetadata {
     CoherencyMetadata coherency_metadata;
 };
 
-class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<CacheTier> 
+class CacheTier : public std::enable_shared_from_this<CacheTier>
 {
     private:
     //------------------------------------------------------------------------------//
@@ -45,7 +46,6 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     //------------------------------------------------------------------------------//
 
     using IStorage = Storage::IStorage;
-
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
 
@@ -73,25 +73,20 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     // Class Creation and Destruction
     //------------------------------------------------------------------------------//
     explicit CacheTier(const Config::CacheDefinition& cache_definition);
-    ~CacheTier() override = default;
+    ~CacheTier() = default;
 
     //------------------------------------------------------------------------------//
     // Public Methods
     //------------------------------------------------------------------------------//
 
-    // IStorage Implementation - Proxy to storage_instance_
+    StorageResult<void> Initialize();
+    StorageResult<void> Shutdown();
+    StorageResult<std::uint64_t> GetCapacityBytes() const;
+    StorageResult<std::uint64_t> GetUsedBytes() const;
+    StorageResult<std::uint64_t> GetAvailableBytes() const;
 
     size_t GetTier() const { return cache_definition_.tier; }
-    Config::StorageType GetType() const override { return storage_instance_->GetType(); }
-    const std::filesystem::path& GetPath() const override { return storage_instance_->GetPath(); }
-
-    StorageResult<std::uint64_t> GetCapacityBytes() const override;
-    StorageResult<std::uint64_t> GetUsedBytes() const override;
-    StorageResult<std::uint64_t> GetAvailableBytes() const override;
-
-    StorageResult<void> Initialize() override;
-    StorageResult<void> Shutdown() override;
-
+    Storage::IStorage* GetStorage() { return storage_instance_.get(); }
 
     void SetMappingCallback(
         std::function<void(const fs::path&,
@@ -100,10 +95,6 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     {
         mapping_cb_ = std::move(cb);
     }
-
-    //------------------------------------------------------------------------------//
-    // Public Fields
-    //------------------------------------------------------------------------------//
 
     StorageResult<std::pair<bool, size_t>> ReadItemIfCacheValid(
         const fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer,
@@ -129,17 +120,11 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     StorageResult<void> FreeUpSpace(size_t required_space);
 
     void ReheatItem(const fs::path& fuse_path);
-
-    /// Re‑calculates the heat of an item based on current time (no access bump)
     void UpdateItemHeat(const fs::path& fuse_path);
-
-    /// Opportunistic refresh of a random subset of items; call periodically
     void RefreshRandomHeats();
 
     StorageResult<void> InvalidateAndRemoveItem(const fs::path& fuse_path);
-
     StorageResult<const ItemMetadata> GetItemMetadata(const fs::path& fuse_path);
-
     StorageResult<void> InsertItemMetadata(const ItemMetadata& item_metadata);
 
     private:
@@ -147,40 +132,11 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     // Private Methods
     //------------------------------------------------------------------------------//
 
-    // Wrappers to storage_instance_
-
-    StorageResult<std::size_t> Read(
-        const fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer
-    ) override;
-    StorageResult<std::size_t> Write(
-        const std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& data
-    ) override;
-    StorageResult<void> Remove(const std::filesystem::path& fuse_path) override;
-    StorageResult<void> Truncate(const std::filesystem::path& fuse_path, off_t size) override;
-
-    StorageResult<void> CreateFile(const std::filesystem::path& fuse_path, mode_t mode) override;
-
-    StorageResult<void> CreateDirectory(const std::filesystem::path& fuse_path, mode_t mode)
-        override;
-
-    StorageResult<void> Move(
-        const std::filesystem::path& from_fuse_path, const std::filesystem::path& to_fuse_path
-    ) override;
-
-    StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
-        const std::filesystem::path& fuse_path
-    ) override;
-
-    StorageResult<bool> CheckIfFileExists(const std::filesystem::path& fuse_path) const override;
-    StorageResult<struct stat> GetAttributes(const std::filesystem::path& fuse_path) const override;
-
-    StorageResult<void> SetPermissions(const fs::path& relative_path, mode_t mode) override;
-
-    StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) override;
-
-    fs::path RelativeToAbsPath(const std::filesystem::path& fuse_path) const override;
-
-    //
+    StorageResult<void> FreeUpSpace_impl(size_t required_space);
+    void ReheatItem_impl(const fs::path& fuse_path);
+    void RefreshRandomHeats_impl();
+    void UpdateItemHeat_impl(const fs::path& fuse_path);
+    StorageResult<void> InvalidateAndRemoveItem_impl(const fs::path& fuse_path);
 
     double CalculateItemHeat(
         const fs::path& fuse_path, const ItemMetadata& item_metadata, time_t current_time
@@ -193,14 +149,12 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     //------------------------------------------------------------------------------//
     // Private Fields
     //------------------------------------------------------------------------------//
-    const Config::CacheDefinition cache_definition_;       ///< Cache definition
-    const std::shared_ptr<Storage::IStorage> origin_;      ///< Origin storage instance
-    std::unique_ptr<Storage::IStorage> storage_instance_;  ///< Storage instance
+    const Config::CacheDefinition cache_definition_;
+    std::unique_ptr<Storage::IStorage> storage_instance_;
     ItemMetadataContainer item_metadatas_;
-    mutable std::recursive_mutex cache_mutex_;  ///< Mutex for cache operations
-    CacheStats stats_;                          ///< Stats for this cache tier
+    mutable std::shared_mutex tier_op_mutex_;
+    CacheStats stats_;
 
-    /// Callback to notify the cache manager of a change in mapping
     std::function<void(const fs::path&,
                        const std::shared_ptr<CacheTier>&,
                        bool)> mapping_cb_;
@@ -213,8 +167,6 @@ class CacheTier : public Storage::IStorage, public std::enable_shared_from_this<
     {
         return p.empty() || p == "." || p == ".." || p == "/";
     }
-
-    friend class CacheManager;  ///< Allow CacheManager to access private members
 };
 
 }  // namespace DistributedCacheFS::Cache
