@@ -20,7 +20,8 @@ using namespace Config;
 CacheManager::CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin)
     : config_(config),
       origin_(std::move(origin)),
-      io_manager_(std::make_unique<AsyncIoManager>())
+      io_manager_(std::make_unique<AsyncIoManager>()),
+      file_lock_manager_(std::make_unique<FileLockManager>())
 {
     if (!origin_) {
         throw std::runtime_error("Origin storage instance is null");
@@ -79,7 +80,8 @@ StorageResult<void> CacheManager::ShutdownAll()
 
 StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fuse_path)
 {
-    std::lock_guard file_lock(*GetFileLock(fuse_path));
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
     return origin_->GetAttributes(fuse_path);
 }
 
@@ -94,7 +96,8 @@ StorageResult<size_t> CacheManager::ReadFile(
     std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& buffer
 )
 {
-    std::lock_guard file_lock(*GetFileLock(fuse_path));
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
 
     auto origin_meta_res = GetOriginCoherencyMetadata(fuse_path);
     if (!origin_meta_res) return std::unexpected(origin_meta_res.error());
@@ -164,7 +167,8 @@ StorageResult<size_t> CacheManager::WriteFile(
     fs::path& fuse_path, off_t offset, std::span<std::byte>& data
 )
 {
-    std::lock_guard file_lock(*GetFileLock(fuse_path));
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
 
     auto res = origin_->Write(fuse_path, offset, data);
     if (!res) return std::unexpected(res.error());
@@ -198,7 +202,8 @@ void CacheManager::InvalidateCache(const fs::path& fuse_path)
 
 StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 {
-    std::lock_guard file_lock(*GetFileLock(fuse_path));
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
     auto res = origin_->Remove(fuse_path);
     if (res) InvalidateCache(fuse_path);
     return res;
@@ -206,7 +211,8 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 
 StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path, off_t size)
 {
-    std::lock_guard file_lock(*GetFileLock(fuse_path));
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
     auto res = origin_->Truncate(fuse_path, size);
     if (res) InvalidateCache(fuse_path); // Simple invalidation, can be optimized
     return res;
@@ -216,9 +222,11 @@ StorageResult<void> CacheManager::Move(
     std::filesystem::path& from_fuse_path, std::filesystem::path& to_fuse_path
 )
 {
-    auto lock1 = GetFileLock(std::min(from_fuse_path, to_fuse_path));
-    auto lock2 = GetFileLock(std::max(from_fuse_path, to_fuse_path));
-    std::scoped_lock file_locks(*lock1, *lock2);
+    // Acquire locks in a globally consistent order to prevent deadlock.
+    auto mutex1 = file_lock_manager_->GetFileLock(std::min(from_fuse_path, to_fuse_path));
+    auto mutex2 = file_lock_manager_->GetFileLock(std::max(from_fuse_path, to_fuse_path));
+    std::scoped_lock file_locks(*mutex1, *mutex2);
+
     auto res = origin_->Move(from_fuse_path, to_fuse_path);
     if (res) {
         InvalidateCache(from_fuse_path);
@@ -229,7 +237,8 @@ StorageResult<void> CacheManager::Move(
 
 StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, mode_t mode)
 {
-    std::lock_guard file_lock(*GetFileLock(fuse_path));
+    auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
+    std::lock_guard file_lock(*file_mutex);
     auto res = origin_->CreateFile(fuse_path, mode);
     if(res) InvalidateCache(fuse_path);
     return res;
@@ -253,18 +262,6 @@ StorageResult<void> CacheManager::SetOwner(const fs::path& fuse_path, uid_t uid,
 StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_path)
 {
     return origin_->GetFilesystemStats(fuse_path.string());
-}
-
-std::shared_ptr<std::mutex> CacheManager::GetFileLock(const fs::path& path)
-{
-    std::lock_guard lock(file_locks_mutex_);
-    auto it = file_locks_.find(path);
-    if (it != file_locks_.end()) {
-        return it->second;
-    }
-    auto new_lock      = std::make_shared<std::mutex>();
-    file_locks_[path] = new_lock;
-    return new_lock;
 }
 
 void CacheManager::FetchAndCacheRegionAsync(

@@ -4,6 +4,7 @@
 #include "async_io_manager.hpp"
 #include "cache/block_metadata.hpp"
 #include "cache/cache_tier.hpp"
+#include "cache/file_lock_manager.hpp"
 #include "config/config_types.hpp"
 #include "storage/i_storage.hpp"
 #include "storage/storage_error.hpp"
@@ -90,18 +91,14 @@ class CacheManager
 
     StorageResult<CoherencyMetadata> GetOriginCoherencyMetadata(const fs::path& fuse_path) const;
 
-    std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
-
     const Config::NodeConfig config_;
     const std::shared_ptr<IStorage> origin_;
     std::unique_ptr<AsyncIoManager> io_manager_;
+    std::unique_ptr<FileLockManager> file_lock_manager_;
 
     TierToCacheMap tier_to_cache_;
     FileStateMap file_states_;
     mutable std::shared_mutex file_states_mutex_;
-
-    mutable std::mutex file_locks_mutex_;
-    std::unordered_map<fs::path, std::shared_ptr<std::mutex>> file_locks_;
 };
 
 }  // namespace DistributedCacheFS::Cache
