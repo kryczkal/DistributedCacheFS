@@ -91,7 +91,7 @@ class CacheManager
     StorageResult<ssize_t> ListXattr(const fs::path& fuse_path, char* list, size_t size);
     StorageResult<void> RemoveXattr(const fs::path& fuse_path, const std::string& name);
 
-    std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
+    std::shared_ptr<std::recursive_mutex> GetFileLock(const fs::path& path);
 
     private:
     void CacheRegionAsync(

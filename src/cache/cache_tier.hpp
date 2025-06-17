@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <shared_mutex>
@@ -75,9 +76,14 @@ class CacheTier
     ) const;
 
     private:
+    void WriteRenameJournalEntry_(const FileId& file_id, const fs::path& from, const fs::path& to);
+    void ClearRenameJournal_();
+    void ReplayRenameJournal_();
+
     const Config::CacheDefinition cache_definition_;
     std::unique_ptr<Storage::IStorage> storage_instance_;
     std::unique_ptr<BlockManager> block_manager_;
+    const fs::path journal_path_;
     CacheStats stats_;
     mutable std::atomic<size_t> read_hit_counter_{0};
 };

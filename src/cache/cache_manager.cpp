@@ -456,7 +456,7 @@ StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_pa
     return origin_->GetFilesystemStats(fuse_path.string());
 }
 
-std::shared_ptr<std::mutex> CacheManager::GetFileLock(const fs::path& path)
+std::shared_ptr<std::recursive_mutex> CacheManager::GetFileLock(const fs::path& path)
 {
     return file_lock_manager_->GetFileLock(path);
 }

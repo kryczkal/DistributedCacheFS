@@ -44,15 +44,15 @@ class FileLockManager
      * ensures the mutex remains alive for the duration of the lock.
      *
      * @param path The filesystem path to lock.
-     * @return A std::shared_ptr<std::mutex> for the given path.
+     * @return A std::shared_ptr<std::recursive_mutex> for the given path.
      */
-    std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
+    std::shared_ptr<std::recursive_mutex> GetFileLock(const fs::path& path);
 
     private:
     void CleanupExpiredLocks_();
 
     std::mutex map_mutex_;
-    std::unordered_map<fs::path, std::weak_ptr<std::mutex>> locks_;
+    std::unordered_map<fs::path, std::weak_ptr<std::recursive_mutex>> locks_;
 
     std::atomic<size_t> access_count_{0};
     static constexpr size_t kCleanupInterval = 1000;

@@ -18,7 +18,7 @@ void FileLockManager::CleanupExpiredLocks_()
     }
 }
 
-std::shared_ptr<std::mutex> FileLockManager::GetFileLock(const fs::path& path)
+std::shared_ptr<std::recursive_mutex> FileLockManager::GetFileLock(const fs::path& path)
 {
     // Atomically increment the counter and get the value *before* increment.
     // A relaxed memory order is sufficient as this is just a counter.
@@ -43,7 +43,7 @@ std::shared_ptr<std::mutex> FileLockManager::GetFileLock(const fs::path& path)
 
     // No active mutex found (either didn't exist or has expired).
     // Create a new one.
-    auto new_mutex = std::make_shared<std::mutex>();
+    auto new_mutex = std::make_shared<std::recursive_mutex>();
     locks_[path]   = new_mutex;  // Insert/update the map with the new weak_ptr.
     return new_mutex;
 }

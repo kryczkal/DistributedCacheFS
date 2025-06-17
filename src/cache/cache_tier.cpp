@@ -5,6 +5,7 @@
 #include "storage/storage_factory.hpp"
 
 #include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <random>
 #include <system_error>
@@ -29,6 +30,7 @@ CacheTier::~CacheTier() = default;
 
 StorageResult<void> CacheTier::Initialize()
 {
+    ReplayRenameJournal_();
     return storage_instance_->Initialize();
 }
 
@@ -205,10 +207,22 @@ bool CacheTier::RemoveLink(const FileId& file_id, const fs::path& path_to_remove
 
 void CacheTier::RenameLink(const FileId& file_id, const fs::path& from, const fs::path& to)
 {
+    try {
+        WriteRenameJournalEntry_(file_id, from, to);
+    } catch (const std::runtime_error& e) {
+        spdlog::critical("Tier {}: Could not write to rename journal, aborting rename. Error: {}", GetTier(), e.what());
+        return;
+    }
+
     auto move_res = storage_instance_->Move(from, to);
     if (move_res) {
         block_manager_->RenameLink(file_id, from, to);
+    } else {
+        spdlog::warn("Tier {}: Storage-level move from '{}' to '{}' failed: {}. Metadata not updated.",
+                     GetTier(), from.string(), to.string(), move_res.error().message());
     }
+
+    ClearRenameJournal_();
 }
 
 double CacheTier::CalculateInitialRegionHeat(double fetch_cost_ms, size_t region_size) const
@@ -226,6 +240,61 @@ double CacheTier::CalculateRegionHeat(
     double time_diff_secs      = std::difftime(current_time, last_access_time);
     double decay_factor        = 1.0 / (1.0 + decay_constant * time_diff_secs);
     return base_heat * decay_factor;
+}
+
+void CacheTier::WriteRenameJournalEntry_(const FileId& file_id, const fs::path& from, const fs::path& to)
+{
+    std::ofstream journal_stream(journal_path_, std::ios::app);
+    if (!journal_stream) {
+        throw std::runtime_error("Failed to write to rename journal: " + journal_path_.string());
+    }
+    journal_stream << file_id.st_dev << " " << file_id.st_ino
+                   << " " << from.string() << " " << to.string() << "\n";
+}
+
+void CacheTier::ClearRenameJournal_()
+{
+    std::error_code ec;
+    fs::remove(journal_path_, ec);
+    if (ec) {
+        spdlog::error("Tier {}: Failed to clear rename journal '{}': {}", GetTier(), journal_path_.string(), ec.message());
+    }
+}
+
+void CacheTier::ReplayRenameJournal_()
+{
+    std::error_code ec;
+    if (!fs::exists(journal_path_, ec)) {
+        return;
+    }
+
+    std::ifstream journal_stream(journal_path_);
+    if (!journal_stream) {
+        spdlog::error("Tier {}: Could not open rename journal for replay: {}", GetTier(), journal_path_.string());
+        return;
+    }
+
+    spdlog::info("Tier {}: Replaying rename journal...", GetTier());
+
+    dev_t st_dev;
+    ino_t st_ino;
+    std::string from_str, to_str;
+    while (journal_stream >> st_dev >> st_ino >> from_str >> to_str) {
+        FileId file_id{st_dev, st_ino};
+        fs::path from_path(from_str);
+        fs::path to_path(to_str);
+
+        if (storage_instance_->CheckIfFileExists(to_path).value_or(false) &&
+            !storage_instance_->CheckIfFileExists(from_path).value_or(false)) {
+            
+            spdlog::info("Tier {}: Recovering rename for file id {}:{} from '{}' to '{}'",
+                         GetTier(), file_id.st_dev, file_id.st_ino, from_path.string(), to_path.string());
+            block_manager_->RenameLink(file_id, from_path, to_path);
+        }
+    }
+    
+    journal_stream.close();
+    ClearRenameJournal_();
 }
 
 }  // namespace DistributedCacheFS::Cache
