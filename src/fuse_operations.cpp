@@ -58,75 +58,6 @@ inline fs::path get_fuse_path(const char *path)
     return fuse_path;
 }
 
-// Basic permission check helper, POSIX-like.
-// access_mask is a bit-OR of R_OK|W_OK|X_OK (same semantics as access(2))
-int permission_check_helper(uid_t file_uid, gid_t file_gid, mode_t file_mode, int access_mask)
-{
-    struct fuse_context *ctx = fuse_get_context();
-    if (!ctx) {
-        spdlog::error("permission_check_helper: missing FUSE context");
-        return -EIO;
-    }
-
-    const uid_t caller_uid = ctx->uid;
-    const gid_t caller_gid = ctx->gid;
-
-    // Root bypass – POSIX: root may ignore mode bits *except* execute on
-    // non-regular files; most filesystems grant everything – we follow that.
-    if (caller_uid == 0) {
-        if ((access_mask & X_OK) && !S_ISDIR(file_mode) &&
-            !(file_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
-            return -EACCES;  // classic root-needs-x corner-case
-        }
-        return 0;
-    }
-
-    // Build the “available permission mask” for THIS caller
-    mode_t avail = 0;
-
-    // owner?
-    if (caller_uid == file_uid) {
-        avail = file_mode & S_IRWXU;
-    } else {
-        // collect caller’s groups (primary + supplementary)
-        bool in_group = (caller_gid == file_gid);
-        if (!in_group) {
-            int ngroups = getgroups(0, nullptr);
-            if (ngroups > 0) {
-                std::vector<gid_t> groups(ngroups);
-                if (getgroups(ngroups, groups.data()) == ngroups) {
-                    in_group = std::find(groups.begin(), groups.end(), file_gid) != groups.end();
-                }
-            }
-        }
-        if (in_group) {
-            avail = file_mode & S_IRWXG;
-        } else {
-            avail = file_mode & S_IRWXO;
-        }
-    }
-
-    // Translate caller’s requested mask into mode bits
-    mode_t need = 0;
-    if (access_mask & R_OK)
-        need |= S_IRUSR;
-    if (access_mask & W_OK)
-        need |= S_IWUSR;
-    if (access_mask & X_OK)
-        need |= S_IXUSR;
-
-    // shift need so that USER bits align with the level we are checking
-    if (avail == (file_mode & S_IRWXG))
-        need >>= 3;
-    else if (avail == (file_mode & S_IRWXO))
-        need >>= 6;
-
-    if ((avail & need) == need) {
-        return 0;  // success
-    }
-    return -EACCES;
-}
-
 // FUSE Operation Implementations
 
 int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/)
@@ -365,8 +296,16 @@ int open(const char *path, struct fuse_file_info *fi)
     if (S_ISDIR(st.st_mode))
         req |= X_OK;  // need search permission
 
-    if (int p = permission_check_helper(st.st_uid, st.st_gid, st.st_mode, req); p != 0)
-        return p;
+    struct fuse_context *ctx = fuse_get_context();
+    if (!ctx) {
+        spdlog::error("open: missing FUSE context");
+        return -EIO;
+    }
+
+    auto perm_res = manager->CheckPermissions(fuse_path, req, ctx->uid, ctx->gid);
+    if (!perm_res) {
+        return Storage::StorageResultToErrno(perm_res);
+    }
 
     // O_TRUNC for regular files
     if ((oflags & O_TRUNC) && S_ISREG(st.st_mode) && (oflags & O_ACCMODE) != O_RDONLY) {
@@ -487,15 +426,19 @@ int opendir(const char *path, struct fuse_file_info *fi)
     if (!S_ISDIR(result.value().st_mode)) {
         return -ENOTDIR;
     }
-    const struct stat &stbuf_opendir = result.value();
-    int access_res                   = FuseOps::permission_check_helper(
-        stbuf_opendir.st_uid, stbuf_opendir.st_gid, stbuf_opendir.st_mode, X_OK
-    );  // Check for execute/search permission
-    if (access_res != 0) {
+
+    struct fuse_context *ctx = fuse_get_context();
+    if (!ctx) {
+        spdlog::error("opendir: missing FUSE context");
+        return -EIO;
+    }
+
+    auto perm_res = manager->CheckPermissions(fuse_path, X_OK, ctx->uid, ctx->gid);
+    if (!perm_res) {
         spdlog::debug(
-            "FUSE opendir: Permission denied for path {}, mode {:#o}", path, stbuf_opendir.st_mode
+            "FUSE opendir: Permission denied for path {}, mode {:#o}", path, result.value().st_mode
         );
-        return access_res;
+        return Storage::StorageResultToErrno(perm_res);
     }
     return 0;
 }

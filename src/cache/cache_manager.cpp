@@ -2,6 +2,7 @@
 #include "cache/tier_selector.hpp"
 
 #include <spdlog/spdlog.h>
+#include <unistd.h>
 #include <algorithm>
 #include <chrono>
 #include <future>
@@ -369,6 +370,72 @@ StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(
         return std::unexpected(res.error());
     }
     return CoherencyMetadata{res.value().st_mtime, res.value().st_size};
+}
+
+StorageResult<void> CacheManager::CheckPermissions(
+    const fs::path& fuse_path, int access_mask, uid_t caller_uid, gid_t caller_gid
+)
+{
+    auto attr_res = this->GetAttributes(const_cast<fs::path&>(fuse_path));
+    if (!attr_res) {
+        return std::unexpected(attr_res.error());
+    }
+    const struct stat& file_attrs = attr_res.value();
+
+    const uid_t file_uid   = file_attrs.st_uid;
+    const gid_t file_gid   = file_attrs.st_gid;
+    const mode_t file_mode = file_attrs.st_mode;
+
+    if (caller_uid == 0) {
+        if ((access_mask & X_OK) && !S_ISDIR(file_mode) &&
+            !(file_mode & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+            return std::unexpected(make_error_code(StorageErrc::PermissionDenied));
+        }
+        return {};
+    }
+
+    mode_t avail = 0;
+
+    if (caller_uid == file_uid) {
+        avail = file_mode & S_IRWXU;
+    } else {
+        bool in_group = (caller_gid == file_gid);
+        if (!in_group) {
+            int ngroups = getgroups(0, nullptr);
+            if (ngroups < 0) {
+                return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+            }
+            if (ngroups > 0) {
+                std::vector<gid_t> groups(ngroups);
+                if (getgroups(ngroups, groups.data()) != ngroups) {
+                    return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+                }
+                in_group = std::find(groups.begin(), groups.end(), file_gid) != groups.end();
+            }
+        }
+        if (in_group) {
+            avail = file_mode & S_IRWXG;
+        } else {
+            avail = file_mode & S_IRWXO;
+        }
+    }
+
+    mode_t need = 0;
+    if (access_mask & R_OK) need |= S_IRUSR;
+    if (access_mask & W_OK) need |= S_IWUSR;
+    if (access_mask & X_OK) need |= S_IXUSR;
+
+    if (avail == (file_mode & S_IRWXG)) {
+        need >>= 3;
+    } else if (avail == (file_mode & S_IRWXO)) {
+        need >>= 6;
+    }
+
+    if ((avail & need) == need) {
+        return {};
+    }
+
+    return std::unexpected(make_error_code(StorageErrc::PermissionDenied));
 }
 
 }  // namespace DistributedCacheFS::Cache

@@ -76,6 +76,9 @@ class CacheManager
     StorageResult<struct statvfs> GetFilesystemStats(fs::path& fuse_path);
     StorageResult<void> SetPermissions(const fs::path& fuse_path, mode_t mode);
     StorageResult<void> SetOwner(const fs::path& fuse_path, uid_t uid, gid_t gid);
+    StorageResult<void> CheckPermissions(
+        const fs::path& fuse_path, int access_mask, uid_t caller_uid, gid_t caller_gid
+    );
 
     private:
     void CacheRegionAsync(
