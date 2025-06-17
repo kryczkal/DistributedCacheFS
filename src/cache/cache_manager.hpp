@@ -29,6 +29,8 @@ namespace DistributedCacheFS::Cache
 
 namespace fs = std::filesystem;
 
+class ITierSelector;
+
 class CacheManager
 {
     private:
@@ -36,8 +38,7 @@ class CacheManager
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
 
-    using TierToCacheMap = std::map<size_t, std::vector<std::shared_ptr<CacheTier>>>;
-    using FileStateMap   = std::unordered_map<fs::path, FileCacheState>;
+    using FileStateMap = std::unordered_map<fs::path, FileCacheState>;
 
     public:
     explicit CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin);
@@ -82,10 +83,6 @@ class CacheManager
         double fetch_cost_ms
     );
 
-    StorageResult<std::shared_ptr<CacheTier>> SelectCacheTierForWrite(
-        double new_region_heat, size_t new_region_size
-    );
-
     void InvalidateCache(const fs::path& fuse_path);
 
     void TryPromoteBlock(
@@ -98,6 +95,7 @@ class CacheManager
     const std::shared_ptr<IStorage> origin_;
     std::unique_ptr<AsyncIoManager> io_manager_;
     std::unique_ptr<FileLockManager> file_lock_manager_;
+    std::unique_ptr<ITierSelector> tier_selector_;
 
     TierToCacheMap tier_to_cache_;
     FileStateMap file_states_;

@@ -17,6 +17,7 @@ class CacheTier;
 
 namespace fs = std::filesystem;
 
+using TierToCacheMap = std::map<size_t, std::vector<std::shared_ptr<CacheTier>>>;
 using Region = std::pair<off_t, size_t>;
 using RegionList = std::vector<Region>;
 

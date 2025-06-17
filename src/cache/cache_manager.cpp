@@ -1,4 +1,5 @@
 #include "cache/cache_manager.hpp"
+#include "cache/tier_selector.hpp"
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -21,7 +22,8 @@ CacheManager::CacheManager(const Config::NodeConfig& config, std::shared_ptr<ISt
     : config_(config),
       origin_(std::move(origin)),
       io_manager_(std::make_unique<AsyncIoManager>()),
-      file_lock_manager_(std::make_unique<FileLockManager>())
+      file_lock_manager_(std::make_unique<FileLockManager>()),
+      tier_selector_(std::make_unique<DefaultTierSelector>())
 {
     if (!origin_) {
         throw std::runtime_error("Origin storage instance is null");
@@ -318,19 +320,25 @@ void CacheManager::CacheRegionAsync(
     }
 
     double initial_heat = best_tier->CalculateInitialRegionHeat(fetch_cost_ms, size);
-    auto tier_res = SelectCacheTierForWrite(initial_heat, size);
+    auto tier_res       = tier_selector_->SelectTierForWrite(initial_heat, size, tier_to_cache_);
 
     if (!tier_res || !tier_res.value()) {
-        spdlog::debug(
-            "CacheRegionAsync for {}: no suitable cache tier found or region not worth inserting.",
-            fuse_path.string()
-        );
+        if (!tier_res) {
+            spdlog::warn(
+                "CacheRegionAsync for {}: tier selection failed with error: {}", fuse_path.string(),
+                tier_res.error().message()
+            );
+        } else {
+            spdlog::debug(
+                "CacheRegionAsync for {}: no suitable cache tier found or region not worth inserting.",
+                fuse_path.string()
+            );
+        }
         return;
     }
     auto tier = tier_res.value();
 
-    ItemMetadata meta{fuse_path, *origin_meta_res, {}, fetch_cost_ms};
-    auto cache_res = tier->CacheRegion(fuse_path, offset, region_span, meta);
+    auto cache_res = tier->CacheRegion(fuse_path, offset, region_span, *origin_meta_res, fetch_cost_ms);
     if (cache_res) {
         std::unique_lock lock(file_states_mutex_);
         file_states_[fuse_path].resident_tiers.insert(tier);
@@ -341,25 +349,6 @@ void CacheManager::CacheRegionAsync(
             cache_res.error().message()
         );
     }
-}
-
-StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
-    double new_region_heat, size_t new_region_size
-)
-{
-    // A simplified tier selection logic
-    std::shared_lock lock(file_states_mutex_);
-    if (tier_to_cache_.empty()) {
-        return nullptr;
-    }
-
-    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
-        for (const auto& tier : it->second) {
-            auto worth_res = tier->IsRegionWorthInserting(new_region_heat, new_region_size);
-            if (worth_res && *worth_res) return tier;
-        }
-    }
-    return nullptr;
 }
 
 void CacheManager::TryPromoteBlock(
