@@ -1,6 +1,8 @@
 #ifndef DISTRIBUTEDCACHEFS_SRC_CACHE_CACHE_MANAGER_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_CACHE_CACHE_MANAGER_HPP_
 
+#include "async_io_manager.hpp"
+#include "cache/block_metadata.hpp"
 #include "cache/cache_tier.hpp"
 #include "config/config_types.hpp"
 #include "storage/i_storage.hpp"
@@ -16,7 +18,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <shared_mutex>
 #include <span>
 #include <unordered_map>
@@ -30,22 +31,14 @@ namespace fs = std::filesystem;
 class CacheManager
 {
     private:
-    //------------------------------------------------------------------------------//
-    // Internal Types
-    //------------------------------------------------------------------------------//
-
     using IStorage = Storage::IStorage;
-
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
 
     using TierToCacheMap = std::map<size_t, std::vector<std::shared_ptr<CacheTier>>>;
-    using FileToCacheMap = std::unordered_map<fs::path, std::shared_ptr<CacheTier>>;
+    using FileStateMap   = std::unordered_map<fs::path, FileCacheState>;
 
     public:
-    //------------------------------------------------------------------------------//
-    // Class Creation and Destruction
-    //------------------------------------------------------------------------------//
     explicit CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin);
     ~CacheManager();
 
@@ -54,15 +47,8 @@ class CacheManager
     CacheManager(CacheManager&&)                 = delete;
     CacheManager& operator=(CacheManager&&)      = delete;
 
-    //------------------------------------------------------------------------------//
-    // Public Methods
-    //------------------------------------------------------------------------------//
-
-    // Initialization / Shutdown
     StorageResult<void> InitializeAll();
     StorageResult<void> ShutdownAll();
-
-    // Core FUSE Operation Handlers
 
     StorageResult<struct stat> GetAttributes(std::filesystem::path& fuse_path);
 
@@ -75,90 +61,47 @@ class CacheManager
     );
 
     StorageResult<size_t> WriteFile(
-        std::filesystem::path& fuse_path, off_t offset,
-        std::span<std::byte>& data
-    );  // Implements write policy
+        std::filesystem::path& fuse_path, off_t offset, std::span<std::byte>& data
+    );
 
-    StorageResult<void> CreateFile(
-        std::filesystem::path& fuse_path, mode_t mode
-    );  // Implements write policy
-
-    StorageResult<void> CreateDirectory(
-        std::filesystem::path& fuse_path, mode_t mode
-    );  // Implements write policy
-
-    StorageResult<void> Remove(std::filesystem::path& fuse_path
-    );  // Implements write policy + cache invalidation
-
-    StorageResult<void> TruncateFile(
-        std::filesystem::path& fuse_path, off_t size
-    );  // Implements write policy + cache invalidation/update
-
+    StorageResult<void> CreateFile(std::filesystem::path& fuse_path, mode_t mode);
+    StorageResult<void> CreateDirectory(std::filesystem::path& fuse_path, mode_t mode);
+    StorageResult<void> Remove(std::filesystem::path& fuse_path);
+    StorageResult<void> TruncateFile(std::filesystem::path& fuse_path, off_t size);
     StorageResult<void> Move(
-        std::filesystem::path& from_fuse_path,
-        std::filesystem::path& to_fuse_path
-    );  // Implements write policy + cache invalidation
-
+        std::filesystem::path& from_fuse_path, std::filesystem::path& to_fuse_path
+    );
     StorageResult<struct statvfs> GetFilesystemStats(fs::path& fuse_path);
-
     StorageResult<void> SetPermissions(const fs::path& fuse_path, mode_t mode);
-
     StorageResult<void> SetOwner(const fs::path& fuse_path, uid_t uid, gid_t gid);
 
-    //------------------------------------------------------------------------------//
-    // Public Fields
-    //------------------------------------------------------------------------------//
-
     private:
-    //------------------------------------------------------------------------------//
-    // Private Methods
-    //------------------------------------------------------------------------------//
-
-    /// Fetch from origin and store in an appropriate cache tier
-    StorageResult<size_t> FetchAndTryCache(
-        fs::path& fuse_path, off_t offset,
-        std::span<std::byte>& buffer  ///< Buffer to potentially fill directly
+    void FetchAndCacheRegionAsync(
+        const fs::path& fuse_path, off_t offset, size_t size
     );
 
-    /// Selects a cache tier for writing new data (based on tier prio, space)
     StorageResult<std::shared_ptr<CacheTier>> SelectCacheTierForWrite(
-        const ItemMetadata& item_metadata
+        double new_region_heat, size_t new_region_size
     );
 
-    StorageResult<void> RemoveMetadataInvalidateCache(
-        const fs::path& fuse_path, const std::shared_ptr<CacheTier>& cache_tier
-    );
+    void InvalidateCache(const fs::path& fuse_path);
 
-    /// Helper to sanitize fuse path
-    void SanitizeFusePath(fs::path& fuse_path) const;
-
-    /// Attempt to promote an item to a faster tier
-    StorageResult<void> TryPromoteItem(fs::path& fuse_path);
+    void TryPromoteBlock(const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier);
 
     StorageResult<CoherencyMetadata> GetOriginCoherencyMetadata(const fs::path& fuse_path) const;
 
     std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
 
-    //------------------------------------------------------------------------------//
-    // Private Fields
-    //------------------------------------------------------------------------------//
-
-    /** Configuration for this cache coordinator */
     const Config::NodeConfig config_;
     const std::shared_ptr<IStorage> origin_;
+    std::unique_ptr<AsyncIoManager> io_manager_;
 
-    TierToCacheMap tier_to_cache_;       ///< Map of cache tiers by tier number
-    FileToCacheMap file_to_cache_;       ///< Map of file paths to cache tiers
-    mutable std::shared_mutex tier_mutex_;  ///< Guards tier_to_cache_
-    mutable std::shared_mutex metadata_mutex_;  ///< Guards file_to_cache_
+    TierToCacheMap tier_to_cache_;
+    FileStateMap file_states_;
+    mutable std::shared_mutex file_states_mutex_;
 
-    /** Per-file locking mechanism */
     mutable std::mutex file_locks_mutex_;
     std::unordered_map<fs::path, std::shared_ptr<std::mutex>> file_locks_;
-
-    //------------------------------------------------------------------------------//
-    // Helpers
-    //------------------------------------------------------------------------------//
 };
 
 }  // namespace DistributedCacheFS::Cache

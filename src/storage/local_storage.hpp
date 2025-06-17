@@ -16,15 +16,7 @@ namespace fs = std::filesystem;
 
 class LocalStorage : public IStorage
 {
-    private:
-    //------------------------------------------------------------------------------//
-    // Internal Types
-    //------------------------------------------------------------------------------//
-
     public:
-    //------------------------------------------------------------------------------//
-    // Class Creation and Destruction
-    //------------------------------------------------------------------------------//
     explicit LocalStorage(const Config::StorageDefinition& definition);
     ~LocalStorage() override = default;
 
@@ -32,12 +24,6 @@ class LocalStorage : public IStorage
     LocalStorage& operator=(const LocalStorage&) = delete;
     LocalStorage(LocalStorage&&)                 = delete;
     LocalStorage& operator=(LocalStorage&&)      = delete;
-
-    //------------------------------------------------------------------------------//
-    // Public Methods
-    //------------------------------------------------------------------------------//
-
-    // IStorage Implementation
 
     Config::StorageType GetType() const override { return definition_.type; }
     const std::filesystem::path& GetPath() const override { return base_path_; }
@@ -54,6 +40,9 @@ class LocalStorage : public IStorage
     ) override;
     StorageResult<void> Remove(const std::filesystem::path& relative_path) override;
     StorageResult<void> Truncate(const std::filesystem::path& relative_path, off_t size) override;
+    StorageResult<void> PunchHole(
+        const std::filesystem::path& relative_path, off_t offset, size_t size
+    ) override;
 
     StorageResult<bool> CheckIfFileExists(const std::filesystem::path& relative_path
     ) const override;
@@ -84,15 +73,7 @@ class LocalStorage : public IStorage
     std::filesystem::path RelativeToAbsPath(const std::filesystem::path& relative_path
     ) const override;
 
-    //------------------------------------------------------------------------------//
-    // Public Fields
-    //------------------------------------------------------------------------------//
-
     private:
-    //------------------------------------------------------------------------------//
-    // Private Methods
-    //------------------------------------------------------------------------------//
-
     std::filesystem::path GetValidatedFullPath(const std::filesystem::path& relative_path) const;
     std::error_code MapFilesystemError(const std::error_code& ec, const std::string& operation = "")
         const;
@@ -104,9 +85,6 @@ class LocalStorage : public IStorage
     ) const;
     StorageResult<void> RemoveXattr(const std::filesystem::path& full_path, const char* key);
 
-    //------------------------------------------------------------------------------//
-    // Private Fields
-    //------------------------------------------------------------------------------//
     static const char* XATTR_ORIGIN_MTIME_KEY;
     static const char* XATTR_ORIGIN_SIZE_KEY;
 
@@ -114,10 +92,6 @@ class LocalStorage : public IStorage
     fs::path base_path_;
     StorageStats stats_;
     mutable std::recursive_mutex storage_mutex_;
-
-    //------------------------------------------------------------------------------//
-    // Helpers
-    //------------------------------------------------------------------------------//
 };
 
 }  // namespace DistributedCacheFS::Storage

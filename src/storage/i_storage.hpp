@@ -23,26 +23,17 @@ namespace DistributedCacheFS::Storage
 
 namespace fs = std::filesystem;
 
-// Interface for a Cache Storage Tier
 class IStorage
 {
     public:
     virtual ~IStorage() = default;
 
-    // Configuration / Identification
-
-    /// Get the tier type (e.g., Local, Shared)
     [[nodiscard]] virtual Config::StorageType GetType() const = 0;
-    /// Get the path to the folder where the files are stored
-    /// Assuming the fitting device/nfs etc. is mounted
     [[nodiscard]] virtual const std::filesystem::path& GetPath() const = 0;
 
-    // Capacity / Usage
     [[nodiscard]] virtual StorageResult<std::size_t> GetCapacityBytes() const  = 0;
     [[nodiscard]] virtual StorageResult<std::size_t> GetUsedBytes() const      = 0;
     [[nodiscard]] virtual StorageResult<std::size_t> GetAvailableBytes() const = 0;
-
-    // Core Read/Write Operations
 
     virtual StorageResult<std::size_t> Read(
         const std::filesystem::path& relative_path, off_t offset, std::span<std::byte>& buffer
@@ -56,6 +47,10 @@ class IStorage
 
     virtual StorageResult<void> Truncate(
         const std::filesystem::path& relative_path, off_t size
+    ) = 0;
+
+    virtual StorageResult<void> PunchHole(
+        const std::filesystem::path& relative_path, off_t offset, size_t size
     ) = 0;
 
     virtual StorageResult<bool> CheckIfFileExists(const std::filesystem::path& relative_path
@@ -84,7 +79,6 @@ class IStorage
 
     virtual StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) = 0;
 
-    // Initialization / Shutdown
     virtual StorageResult<void> Initialize() = 0;
     virtual StorageResult<void> Shutdown()   = 0;
 
