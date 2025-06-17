@@ -51,38 +51,6 @@ Storage::StorageErrc XattrErrnoToStorageErrc(int err_no)
     }
 }
 
-Storage::StorageErrc ErrnoToStorageErrc(int err_no)
-{
-    switch (err_no) {
-        case 0:
-            return Storage::StorageErrc::Success;
-        case ENOENT:
-            return Storage::StorageErrc::FileNotFound;
-        case EACCES:
-        case EPERM:
-            return Storage::StorageErrc::PermissionDenied;
-        case EIO:
-            return Storage::StorageErrc::IOError;
-        case ENOSPC:
-            return Storage::StorageErrc::OutOfSpace;
-        case EINVAL:
-            return Storage::StorageErrc::InvalidOffset;
-        case EEXIST:
-            return Storage::StorageErrc::AlreadyExists;
-        case ENOTDIR:
-            return Storage::StorageErrc::NotADirectory;
-        case EISDIR:
-            return Storage::StorageErrc::IsADirectory;
-        case ENOTEMPTY:
-            return Storage::StorageErrc::NotEmpty;
-        case EOPNOTSUPP:
-            return Storage::StorageErrc::NotSupported;
-
-        default:
-            return Storage::StorageErrc::UnknownError;
-    }
-}
-
 class FileDescriptorGuard
 {
     private:

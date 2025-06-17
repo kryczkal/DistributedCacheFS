@@ -1,6 +1,5 @@
 #include "cache_tier.hpp"
 #include "app_constants.hpp"
-#include "block_manager.hpp"
 #include "storage/local_storage.hpp"
 #include "storage/storage_factory.hpp"
 
@@ -69,7 +68,7 @@ StorageResult<std::pair<RegionList, RegionList>> CacheTier::GetCachedRegions(
         file_id, access_path, offset, size, origin_metadata, heat_updater, on_stale_item
     );
 
-    if (result && !result->first.empty()) {
+    if (!result.first.empty()) {
         size_t prev_hits = read_hit_counter_.fetch_add(1, std::memory_order_relaxed);
         if (prev_hits + 1 >= Constants::HEAT_REFRESH_PERIOD) {
             read_hit_counter_.store(0, std::memory_order_relaxed);

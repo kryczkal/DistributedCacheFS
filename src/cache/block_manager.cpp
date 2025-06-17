@@ -128,7 +128,7 @@ void BlockManager::CacheRegion(
             item_index.modify(item_it, [&](ItemMetadata& item) {
                 item.blocks.clear();
                 item.coherency_metadata = coherency_metadata;
-                eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>().erase(file_id);
+                eviction_queue_.get<EvictionCandidate::ByFileId>().erase(file_id);
             });
         }
     }
@@ -166,22 +166,28 @@ std::vector<BlockMetadata> BlockManager::InvalidateRegion(
         return invalidated_blocks;
     }
 
-    off_t invalidation_end = offset + size;
-    auto& blocks           = item_it->blocks;
-    auto& heat_index       = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
 
-    for (auto it = blocks.begin(); it != blocks.end();) {
-        off_t block_start = it->first;
-        off_t block_end   = block_start + it->second.size;
+    item_index.modify(item_it, [&](ItemMetadata& item) {
+        off_t invalidation_end = offset + size;
+        auto& blocks           = item.blocks;
 
-        if (block_start < invalidation_end && block_end > offset) {
-            invalidated_blocks.push_back(it->second);
-            heat_index.erase(std::make_tuple(file_id, it->first));
-            it = blocks.erase(it);
-        } else {
-            ++it;
+        for (auto it = blocks.begin(); it != blocks.end();) {
+            off_t block_start = it->first;
+            off_t block_end   = block_start + it->second.size;
+
+            if (block_start < invalidation_end && block_end > offset) {
+                invalidated_blocks.push_back(it->second);
+                auto eviction_it = heat_index.find(std::make_tuple(file_id, it->first));
+                if (eviction_it != heat_index.end()) {
+                    heat_index.erase(eviction_it);
+                }
+                it = blocks.erase(it);
+            } else {
+                ++it;
+            }
         }
-    }
+    });
     return invalidated_blocks;
 }
 
@@ -202,8 +208,7 @@ std::vector<BlockMetadata> BlockManager::InvalidateAndRemoveItem(const FileId& f
 
     item_index.erase(item_it);
 
-    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
-    heat_index.erase(file_id);
+    eviction_queue_.get<EvictionCandidate::ByFileId>().erase(file_id);
 
     return invalidated_blocks;
 }
@@ -271,7 +276,10 @@ void BlockManager::RemoveEvictionVictims(const std::vector<EvictionCandidate>& v
     auto& item_index        = item_metadatas_.get<by_file_id>();
 
     for (const auto& victim : victims) {
-        path_offset_index.erase(std::make_tuple(victim.file_id, victim.offset));
+        auto eviction_it = path_offset_index.find(std::make_tuple(victim.file_id, victim.offset));
+        if (eviction_it != path_offset_index.end()) {
+            path_offset_index.erase(eviction_it);
+        }
 
         auto item_it = item_index.find(victim.file_id);
         if (item_it != item_index.end()) {
@@ -312,6 +320,7 @@ void BlockManager::RefreshRandomHeats(
         }
     }
 
+    auto& fido_idx = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
     for (const auto& candidate : to_update) {
         auto item_it = item_index.find(candidate.file_id);
         if (item_it == item_index.end())
@@ -320,10 +329,14 @@ void BlockManager::RefreshRandomHeats(
         if (block_it == item_it->blocks.end())
             continue;
 
-        double new_heat  = heat_updater(block_it->second, candidate.heat);
-        auto eviction_it = heat_idx.find(candidate);
-        if (eviction_it != heat_idx.end()) {
-            heat_idx.modify(eviction_it, [&](EvictionCandidate& c) {
+        double new_heat = heat_updater(block_it->second, candidate.heat);
+
+        auto eviction_it = fido_idx.find(std::make_tuple(candidate.file_id, candidate.offset));
+        if (eviction_it != fido_idx.end()) {
+            // We can use any index's modify, as long as we use an iterator valid for that
+            // index. Since we have an iterator from fido_idx, we use that. The
+            // container will ensure all other indices are updated correctly.
+            fido_idx.modify(eviction_it, [&](EvictionCandidate& c) {
                 c.heat = new_heat;
             });
         }
@@ -370,7 +383,7 @@ void BlockManager::RenameLink(const FileId& file_id, const fs::path& from, const
         });
     }
 
-    auto& heat_index              = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto& heat_index              = eviction_queue_.get<EvictionCandidate::ByFileId>();
     auto [range_begin, range_end] = heat_index.equal_range(file_id);
     for (auto it = range_begin; it != range_end; ++it) {
         if (it->path_for_storage == from) {

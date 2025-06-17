@@ -1,6 +1,7 @@
 #ifndef DISTRIBUTEDCACHEFS_SRC_CACHE_CACHE_TIER_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_CACHE_CACHE_TIER_HPP_
 
+#include "block_manager.hpp"
 #include "block_metadata.hpp"
 #include "cache_stats.hpp"
 #include "config/config_types.hpp"
@@ -17,11 +18,11 @@
 namespace DistributedCacheFS::Cache
 {
 
-namespace fs  = std::filesystem;
-namespace bmi = boost::multi_index;
+namespace fs = std::filesystem;
 
-struct ItemMetadata;
-class BlockManager;
+// No longer need forward declarations, they are in the included header.
+// struct ItemMetadata;
+// class BlockManager;
 
 class CacheTier
 {

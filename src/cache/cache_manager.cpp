@@ -1,11 +1,13 @@
 #include "cache/cache_manager.hpp"
 #include "cache/tier_selector.hpp"
+#include "storage/storage_error.hpp"
 
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <list>
 #include <memory>
 #include <numeric>
 #include <set>
@@ -167,24 +169,24 @@ StorageResult<size_t> CacheManager::ReadFile(
             tier_to_cache_.rbegin()->second.front()->GetStats().IncrementMisses();
         }
 
-        std::vector<std::future<Storage::StorageResult<std::vector<std::byte>>>> futures;
-        futures.reserve(missing_regions.size());
+        using ReadFuture = std::future<std::vector<std::byte>>;
+        std::list<std::pair<Region, ReadFuture>> region_futures;
+
         for (const auto& region : missing_regions) {
-            futures.push_back(
-                io_manager_->SubmitRead(origin_, fuse_path, region.first, region.second)
+            region_futures.emplace_back(
+                region, io_manager_->SubmitRead(origin_, fuse_path, region.first, region.second)
             );
         }
 
-        for (size_t i = 0; i < futures.size(); ++i) {
-            auto start_time = std::chrono::steady_clock::now();
-            auto res        = futures[i].get();
-            auto end_time   = std::chrono::steady_clock::now();
+        for (auto& [region, future] : region_futures) {
+            try {
+                auto start_time = std::chrono::steady_clock::now();
+                std::vector<std::byte> read_data = future.get();
+                auto end_time                    = std::chrono::steady_clock::now();
 
-            if (res) {
-                const auto& read_data       = *res;
-                size_t bytes_actually_read  = read_data.size();
-                off_t region_offset         = missing_regions[i].first;
-                off_t buffer_start_at       = region_offset - offset;
+                size_t bytes_actually_read = read_data.size();
+                off_t region_offset        = region.first;
+                off_t buffer_start_at      = region_offset - offset;
 
                 if (bytes_actually_read > 0) {
                     std::copy(
@@ -203,7 +205,7 @@ StorageResult<size_t> CacheManager::ReadFile(
                     );
 
                     io_manager_->SubmitTask([this, file_id, fuse_path, region_offset,
-                                             data_to_cache = std::move(*res),
+                                             data_to_cache = std::move(read_data),
                                              fetch_cost_ms]() mutable {
                         this->CacheRegionAsync(
                             file_id, fuse_path, region_offset, std::move(data_to_cache),
@@ -211,8 +213,13 @@ StorageResult<size_t> CacheManager::ReadFile(
                         );
                     });
                 }
-            } else {
-                return std::unexpected(res.error());
+            }
+            catch (const Storage::StorageException& e) {
+                return std::unexpected(e.code());
+            }
+            catch (const std::exception& e) {
+                spdlog::error("Unexpected exception during async read: {}", e.what());
+                return std::unexpected(make_error_code(Storage::StorageErrc::UnknownError));
             }
         }
     }

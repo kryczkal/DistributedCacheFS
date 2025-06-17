@@ -5,6 +5,7 @@
 #include "storage/storage_error.hpp"
 
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>

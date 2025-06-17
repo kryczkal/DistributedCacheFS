@@ -2,6 +2,7 @@
 #define DISTRIBUTEDCACHEFS_SRC_STORAGE_STORAGE_ERROR_HPP_
 
 #include <expected>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -38,6 +39,38 @@ enum class StorageErrc {
 // clang-format on
 
 std::error_code make_error_code(StorageErrc e);
+
+inline StorageErrc ErrnoToStorageErrc(int err_no)
+{
+    switch (err_no) {
+        case 0:
+            return StorageErrc::Success;
+        case ENOENT:
+            return StorageErrc::FileNotFound;
+        case EACCES:
+        case EPERM:
+            return StorageErrc::PermissionDenied;
+        case EIO:
+            return StorageErrc::IOError;
+        case ENOSPC:
+            return StorageErrc::OutOfSpace;
+        case EINVAL:
+            return StorageErrc::InvalidOffset;
+        case EEXIST:
+            return StorageErrc::AlreadyExists;
+        case ENOTDIR:
+            return StorageErrc::NotADirectory;
+        case EISDIR:
+            return StorageErrc::IsADirectory;
+        case ENOTEMPTY:
+            return StorageErrc::NotEmpty;
+        case EOPNOTSUPP:
+            return StorageErrc::NotSupported;
+
+        default:
+            return StorageErrc::UnknownError;
+    }
+}
 
 //------------------------------------------------------------------------------//
 // Error Category Definition (Private Implementation Detail)
@@ -104,6 +137,20 @@ inline std::error_code make_error_code(StorageErrc e)
 {
     return {static_cast<int>(e), storage_error_category};
 }
+
+//------------------------------------------------------------------------------//
+// Custom Exception Type
+//------------------------------------------------------------------------------//
+class StorageException : public std::runtime_error
+{
+    private:
+    std::error_code ec_;
+
+    public:
+    explicit StorageException(std::error_code ec) : std::runtime_error(ec.message()), ec_(ec) {}
+
+    const std::error_code& code() const noexcept { return ec_; }
+};
 
 //------------------------------------------------------------------------------//
 // Result Type Alias

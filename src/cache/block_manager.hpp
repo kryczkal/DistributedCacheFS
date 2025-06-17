@@ -54,7 +54,10 @@ class BlockManager
                 bmi::composite_key<
                     EvictionCandidate,
                     bmi::member<EvictionCandidate, FileId, &EvictionCandidate::file_id>,
-                    bmi::member<EvictionCandidate, off_t, &EvictionCandidate::offset>>>>>;
+                    bmi::member<EvictionCandidate, off_t, &EvictionCandidate::offset>>>,
+            bmi::hashed_non_unique<
+                bmi::tag<EvictionCandidate::ByFileId>,
+                bmi::member<EvictionCandidate, FileId, &EvictionCandidate::file_id>>>>;
 
     public:
     BlockManager();

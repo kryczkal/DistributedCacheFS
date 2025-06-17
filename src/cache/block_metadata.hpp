@@ -1,6 +1,7 @@
 #ifndef DISTRIBUTEDCACHEFS_SRC_CACHE_BLOCK_METADATA_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_CACHE_BLOCK_METADATA_HPP_
 
+#include <boost/container_hash/hash.hpp>
 #include <sys/types.h>
 #include <ctime>
 #include <filesystem>
@@ -44,6 +45,14 @@ struct FileId {
     }
 };
 
+inline std::size_t hash_value(const FileId& id)
+{
+    std::size_t seed = 0;
+    boost::hash_combine(seed, id.st_dev);
+    boost::hash_combine(seed, id.st_ino);
+    return seed;
+}
+
 struct BlockMetadata {
     off_t offset;
     size_t size;
@@ -63,6 +72,8 @@ struct EvictionCandidate {
     struct ByHeat {
     };
     struct ByFileIdAndOffset {
+    };
+    struct ByFileId {
     };
 };
 

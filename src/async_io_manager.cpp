@@ -1,5 +1,6 @@
 #include "async_io_manager.hpp"
 
+#include "storage/storage_error.hpp"
 #include <spdlog/spdlog.h>
 
 namespace DistributedCacheFS
@@ -66,14 +67,14 @@ std::future<AsyncIoManager::ReadResult> AsyncIoManager::SubmitRead(
 {
     auto task_ptr =
         std::make_shared<std::packaged_task<ReadResult()>>([storage, path, offset,
-                                                            bytes_to_read]() mutable {
+                                                            bytes_to_read]() mutable -> ReadResult {
             std::vector<std::byte> data_buffer(bytes_to_read);
             std::span<std::byte> buffer_span{data_buffer};
 
             Storage::StorageResult<size_t> read_res = storage->Read(path, offset, buffer_span);
 
             if (!read_res) {
-                return std::unexpected(read_res.error());
+                throw Storage::StorageException(read_res.error());
             }
 
             data_buffer.resize(*read_res);
