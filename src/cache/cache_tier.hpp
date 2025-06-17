@@ -6,15 +6,9 @@
 #include "config/config_types.hpp"
 #include "storage/i_storage.hpp"
 
-#include <boost/multi_index/composite_key.hpp>
-#include <boost/multi_index/hashed_index.hpp>
-#include <boost/multi_index/indexed_by.hpp>
-#include <boost/multi_index/member.hpp>
-#include <boost/multi_index/ordered_index.hpp>
-#include <boost/multi_index_container.hpp>
-
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <shared_mutex>
 #include <vector>
 
@@ -24,13 +18,8 @@ namespace DistributedCacheFS::Cache
 namespace fs  = std::filesystem;
 namespace bmi = boost::multi_index;
 
-struct ItemMetadata
-{
-    fs::path path;
-    CoherencyMetadata coherency_metadata;
-    std::map<off_t, BlockMetadata> blocks;
-    double base_fetch_cost_ms = 1.0;
-};
+struct ItemMetadata;
+class BlockManager;
 
 class CacheTier
 {
@@ -39,30 +28,9 @@ class CacheTier
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
 
-    struct by_path
-    {
-    };
-    using ItemMetadataContainer = bmi::multi_index_container<
-        ItemMetadata,
-        bmi::indexed_by<
-            bmi::hashed_unique<bmi::tag<by_path>, bmi::member<ItemMetadata, fs::path, &ItemMetadata::path>>>>;
-
-    using EvictionQueue = bmi::multi_index_container<
-        EvictionCandidate,
-        bmi::indexed_by<
-            bmi::ordered_non_unique<
-                bmi::tag<EvictionCandidate::ByHeat>,
-                bmi::member<EvictionCandidate, double, &EvictionCandidate::heat>>,
-            bmi::hashed_unique<
-                bmi::tag<EvictionCandidate::ByPathAndOffset>,
-                bmi::composite_key<
-                    EvictionCandidate,
-                    bmi::member<EvictionCandidate, fs::path, &EvictionCandidate::path>,
-                    bmi::member<EvictionCandidate, off_t, &EvictionCandidate::offset>>>>>;
-
     public:
     explicit CacheTier(const Config::CacheDefinition& cache_definition);
-    ~CacheTier() = default;
+    ~CacheTier();
 
     StorageResult<void> Initialize();
     StorageResult<void> Shutdown();
@@ -80,7 +48,7 @@ class CacheTier
 
     StorageResult<void> CacheRegion(
         const fs::path& fuse_path, off_t offset, std::span<std::byte> data,
-        const ItemMetadata& item_metadata
+        const CoherencyMetadata& coherency_metadata, double base_fetch_cost_ms
     );
 
     StorageResult<bool> IsRegionWorthInserting(double new_region_heat, size_t new_region_size);
@@ -98,14 +66,9 @@ class CacheTier
     ) const;
 
     private:
-    StorageResult<void> FreeUpSpace_impl(size_t required_space);
-    void RefreshRandomHeats_impl();
-
     const Config::CacheDefinition cache_definition_;
     std::unique_ptr<Storage::IStorage> storage_instance_;
-    ItemMetadataContainer item_metadatas_;
-    EvictionQueue eviction_queue_;
-    mutable std::shared_mutex metadata_mutex_;
+    std::unique_ptr<BlockManager> block_manager_;
     CacheStats stats_;
 };
 
