@@ -38,7 +38,7 @@ struct ItemMetadata {
     CoherencyMetadata coherency_metadata;
 };
 
-class CacheTier : public std::enable_shared_from_this<CacheTier>
+class CacheTier
 {
     private:
     //------------------------------------------------------------------------------//
@@ -87,14 +87,6 @@ class CacheTier : public std::enable_shared_from_this<CacheTier>
 
     size_t GetTier() const { return cache_definition_.tier; }
     Storage::IStorage* GetStorage() { return storage_instance_.get(); }
-
-    void SetMappingCallback(
-        std::function<void(const fs::path&,
-                           const std::shared_ptr<CacheTier>&,
-                           bool /*add?*/)> cb)
-    {
-        mapping_cb_ = std::move(cb);
-    }
 
     StorageResult<std::pair<bool, size_t>> ReadItemIfCacheValid(
         const fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer,
@@ -152,12 +144,8 @@ class CacheTier : public std::enable_shared_from_this<CacheTier>
     const Config::CacheDefinition cache_definition_;
     std::unique_ptr<Storage::IStorage> storage_instance_;
     ItemMetadataContainer item_metadatas_;
-    mutable std::shared_mutex tier_op_mutex_;
+    mutable std::shared_mutex metadata_mutex_;
     CacheStats stats_;
-
-    std::function<void(const fs::path&,
-                       const std::shared_ptr<CacheTier>&,
-                       bool)> mapping_cb_;
 
     //------------------------------------------------------------------------------//
     // Helpers

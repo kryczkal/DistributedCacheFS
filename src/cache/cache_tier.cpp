@@ -30,35 +30,30 @@ CacheTier::CacheTier(const Config::CacheDefinition &cache_definition)
 
 StorageResult<void> CacheTier::Initialize()
 {
-    std::unique_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::Initialize(tier={})", cache_definition_.tier);
     return storage_instance_->Initialize();
 }
 
 StorageResult<void> CacheTier::Shutdown()
 {
-    std::unique_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::Shutdown(tier={})", cache_definition_.tier);
     return storage_instance_->Shutdown();
 }
 
 StorageResult<std::uint64_t> CacheTier::GetCapacityBytes() const
 {
-    std::shared_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::GetCapacityBytes(tier={})", cache_definition_.tier);
     return storage_instance_->GetCapacityBytes();
 }
 
 StorageResult<std::uint64_t> CacheTier::GetUsedBytes() const
 {
-    std::shared_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::GetUsedBytes(tier={})", cache_definition_.tier);
     return storage_instance_->GetUsedBytes();
 }
 
 StorageResult<std::uint64_t> CacheTier::GetAvailableBytes() const
 {
-    std::shared_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::GetAvailableBytes(tier={})", cache_definition_.tier);
     return storage_instance_->GetAvailableBytes();
 }
@@ -68,20 +63,25 @@ StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
     const CoherencyMetadata &origin_metadata
 )
 {
-    std::unique_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::ReadItemIfCacheValid({})", fuse_path.string());
 
-    auto validate_item_res = IsCacheItemValid(fuse_path, origin_metadata);
-    if (!validate_item_res) {
-        return std::unexpected(validate_item_res.error());
-    }
+    {
+        std::unique_lock lock(metadata_mutex_);
 
-    if (!validate_item_res.value()) {
-        auto invalidate_item_res = InvalidateAndRemoveItem_impl(fuse_path);
-        if (!invalidate_item_res) {
-            return std::unexpected(invalidate_item_res.error());
+        auto validate_item_res = IsCacheItemValid(fuse_path, origin_metadata);
+        if (!validate_item_res) {
+            return std::unexpected(validate_item_res.error());
         }
-        return std::make_pair(false, 0);
+
+        if (!validate_item_res.value()) {
+            auto invalidate_item_res = InvalidateAndRemoveItem_impl(fuse_path);
+            if (!invalidate_item_res) {
+                return std::unexpected(invalidate_item_res.error());
+            }
+            return std::make_pair(false, 0);
+        }
+
+        ReheatItem_impl(fuse_path);
     }
 
     auto res = storage_instance_->Read(fuse_path, offset, buffer);
@@ -89,7 +89,6 @@ StorageResult<std::pair<bool, size_t>> CacheTier::ReadItemIfCacheValid(
         return std::unexpected(res.error());
     }
 
-    ReheatItem_impl(fuse_path);
     return std::make_pair(true, res.value());
 }
 
@@ -98,7 +97,6 @@ StorageResult<bool> CacheTier::CacheItemIfWorthIt(
     const ItemMetadata &item_metadata
 )
 {
-    std::unique_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::CacheItemIfWorthIt(tier={})", cache_definition_.tier);
 
     auto res = IsItemWorthInserting(item_metadata);
@@ -121,12 +119,15 @@ StorageResult<void> CacheTier::CacheItemForcibly(
     const ItemMetadata &item_metadata
 )
 {
-    std::unique_lock lock(tier_op_mutex_);
     spdlog::debug("CacheTier::CacheItemForcibly(tier={})", cache_definition_.tier);
 
-    auto res = FreeUpSpace_impl(item_metadata.coherency_metadata.size_bytes);
-    if (!res) {
-        return std::unexpected(res.error());
+    {
+        std::unique_lock lock(metadata_mutex_);
+
+        auto res = FreeUpSpace_impl(item_metadata.coherency_metadata.size_bytes);
+        if (!res) {
+            return std::unexpected(res.error());
+        }
     }
 
     auto write_res = storage_instance_->Write(fuse_path, offset, data);
@@ -134,11 +135,8 @@ StorageResult<void> CacheTier::CacheItemForcibly(
         return std::unexpected(write_res.error());
     }
 
+    std::unique_lock lock(metadata_mutex_);
     item_metadatas_.insert(item_metadata);
-
-    if (mapping_cb_) {
-        mapping_cb_(fuse_path, shared_from_this(), true);
-    }
     return {};
 }
 
@@ -146,7 +144,7 @@ StorageResult<bool> CacheTier::IsCacheItemValid(
     const fs::path &fuse_path, const CoherencyMetadata &origin_metadata
 ) const
 {
-    std::shared_lock lock(tier_op_mutex_);
+    std::shared_lock lock(metadata_mutex_);
     spdlog::debug("CacheTier::IsCacheValid({})", fuse_path.string());
 
     auto it = item_metadatas_.find(fuse_path);
@@ -164,7 +162,7 @@ StorageResult<bool> CacheTier::IsCacheItemValid(
 
 StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item)
 {
-    std::shared_lock lock(tier_op_mutex_);
+    std::shared_lock lock(metadata_mutex_);
     RefreshRandomHeats_impl();
 
     auto avail_res = GetAvailableBytes();
@@ -186,7 +184,7 @@ StorageResult<bool> CacheTier::IsItemWorthInserting(const ItemMetadata &item)
 
 StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
 {
-    std::unique_lock lock(tier_op_mutex_);
+    std::unique_lock lock(metadata_mutex_);
     return FreeUpSpace_impl(required_space);
 }
 
@@ -204,7 +202,7 @@ StorageResult<void> CacheTier::FreeUpSpace_impl(size_t required_space)
     for (auto it = by_heat.begin(); it != by_heat.end() && reclaimed < required_space;) {
         const fs::path victim = it->path;
         const size_t vsize = it->coherency_metadata.size_bytes;
-        
+
         auto rm_res = storage_instance_->Remove(victim);
         if (!rm_res) {
             spdlog::error("FreeUpSpace failed to remove victim file {}: {}", victim.string(), rm_res.error().message());
@@ -224,7 +222,7 @@ StorageResult<void> CacheTier::FreeUpSpace_impl(size_t required_space)
 
 void CacheTier::ReheatItem(const fs::path &fuse_path)
 {
-    std::unique_lock lock(tier_op_mutex_);
+    std::unique_lock lock(metadata_mutex_);
     ReheatItem_impl(fuse_path);
 }
 
@@ -248,7 +246,7 @@ void CacheTier::ReheatItem_impl(const fs::path &fuse_path)
 
 void CacheTier::UpdateItemHeat(const fs::path &fuse_path)
 {
-    std::unique_lock lock(tier_op_mutex_);
+    std::unique_lock lock(metadata_mutex_);
     UpdateItemHeat_impl(fuse_path);
 }
 
@@ -264,7 +262,7 @@ void CacheTier::UpdateItemHeat_impl(const fs::path &fuse_path)
 
 void CacheTier::RefreshRandomHeats()
 {
-    std::unique_lock lock(tier_op_mutex_);
+    std::unique_lock lock(metadata_mutex_);
     RefreshRandomHeats_impl();
 }
 
@@ -287,7 +285,7 @@ void CacheTier::RefreshRandomHeats_impl()
             paths_to_update.push_back(metadata_item.path);
         }
     }
-    
+
     for (const auto& p : paths_to_update) {
         UpdateItemHeat_impl(p);
     }
@@ -295,7 +293,7 @@ void CacheTier::RefreshRandomHeats_impl()
 
 StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path &fuse_path)
 {
-    std::unique_lock lock(tier_op_mutex_);
+    std::unique_lock lock(metadata_mutex_);
     return InvalidateAndRemoveItem_impl(fuse_path);
 }
 
@@ -311,9 +309,6 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem_impl(const fs::path &fuse
     auto it = item_metadatas_.find(fuse_path);
     if (it != item_metadatas_.end()) {
         item_metadatas_.erase(it);
-        if (mapping_cb_) {
-            mapping_cb_(fuse_path, shared_from_this(), false);
-        }
     }
 
     return {};
@@ -321,7 +316,7 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem_impl(const fs::path &fuse
 
 StorageResult<const ItemMetadata> CacheTier::GetItemMetadata(const fs::path &fuse_path)
 {
-    std::shared_lock lock(tier_op_mutex_);
+    std::shared_lock lock(metadata_mutex_);
     spdlog::debug("CacheTier::GetItemMetadata(tier={}, {})", cache_definition_.tier, fuse_path.string());
 
     auto it = item_metadatas_.find(fuse_path);
@@ -333,7 +328,7 @@ StorageResult<const ItemMetadata> CacheTier::GetItemMetadata(const fs::path &fus
 
 StorageResult<void> CacheTier::InsertItemMetadata(const ItemMetadata &item_metadata)
 {
-    std::unique_lock lock(tier_op_mutex_);
+    std::unique_lock lock(metadata_mutex_);
     spdlog::debug("CacheTier::InsertItemMetadata(tier={})", cache_definition_.tier);
 
     auto [it, inserted] = item_metadatas_.insert(item_metadata);

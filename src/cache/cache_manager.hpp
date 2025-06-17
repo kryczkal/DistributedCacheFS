@@ -137,6 +137,8 @@ class CacheManager
 
     StorageResult<CoherencyMetadata> GetOriginCoherencyMetadata(const fs::path& fuse_path) const;
 
+    std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
+
     //------------------------------------------------------------------------------//
     // Private Fields
     //------------------------------------------------------------------------------//
@@ -145,12 +147,14 @@ class CacheManager
     const Config::NodeConfig config_;
     const std::shared_ptr<IStorage> origin_;
 
-    TierToCacheMap tier_to_cache_;  ///< Map of cache tiers by tier number
-    FileToCacheMap file_to_cache_;  ///< Map of file paths to cache tiers
-
-    /** Protects item_metadatas_ */
+    TierToCacheMap tier_to_cache_;       ///< Map of cache tiers by tier number
+    FileToCacheMap file_to_cache_;       ///< Map of file paths to cache tiers
+    mutable std::shared_mutex tier_mutex_;  ///< Guards tier_to_cache_
     mutable std::shared_mutex metadata_mutex_;  ///< Guards file_to_cache_
-    mutable std::shared_mutex tier_mutex_;      ///< Guards tier_to_cache_
+
+    /** Per-file locking mechanism */
+    mutable std::mutex file_locks_mutex_;
+    std::unordered_map<fs::path, std::shared_ptr<std::mutex>> file_locks_;
 
     //------------------------------------------------------------------------------//
     // Helpers

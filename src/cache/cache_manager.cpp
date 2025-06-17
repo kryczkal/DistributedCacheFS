@@ -63,6 +63,7 @@ StorageResult<void> CacheManager::InitializeAll()
 
     {
         std::unique_lock lock_tiers(tier_mutex_);
+        std::unique_lock lock_meta(metadata_mutex_);
         tier_to_cache_.clear();
         file_to_cache_.clear();
 
@@ -72,22 +73,6 @@ StorageResult<void> CacheManager::InitializeAll()
                 spdlog::error("Failed to initialize cache tier {}: {}", cache_definition.tier, res.error().message());
                 return std::unexpected(res.error());
             }
-            
-            cache_instance->SetMappingCallback(
-                [this](const fs::path& p,
-                       const std::shared_ptr<CacheTier>& tier,
-                       bool add)
-                {
-                    std::unique_lock w(metadata_mutex_);
-                    if (add) {
-                        file_to_cache_[p] = tier;
-                    } else {
-                        auto it = file_to_cache_.find(p);
-                        if (it != file_to_cache_.end() && it->second == tier) {
-                            file_to_cache_.erase(it);
-                        }
-                    }
-                });
 
             tier_to_cache_[cache_definition.tier].push_back(std::move(cache_instance));
         }
@@ -98,7 +83,8 @@ StorageResult<void> CacheManager::InitializeAll()
 
 StorageResult<void> CacheManager::ShutdownAll()
 {
-    std::unique_lock lock(metadata_mutex_);
+    std::unique_lock lock_tiers(tier_mutex_);
+    std::unique_lock lock_meta(metadata_mutex_);
     spdlog::debug("CacheManager::ShutdownAll()");
     spdlog::info("Shutting down CacheManager ...");
     std::error_code first_error;
@@ -146,6 +132,7 @@ StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fu
         spdlog::warn("GetAttributes failed: empty path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     auto origin_stat_res = origin_->GetAttributes(fuse_path);
     if (!origin_stat_res) {
@@ -172,7 +159,7 @@ StorageResult<struct stat> CacheManager::GetAttributes(std::filesystem::path& fu
             RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         }
     }
-    
+
     spdlog::trace("CacheManager::GetAttributes -> Success");
     return origin_stat;
 }
@@ -202,6 +189,7 @@ StorageResult<size_t> CacheManager::ReadFile(
         spdlog::warn("ReadFile failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     std::shared_ptr<CacheTier> cache_tier;
     {
@@ -241,6 +229,7 @@ StorageResult<size_t> CacheManager::WriteFile(
         spdlog::warn("WriteFile failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     auto res = origin_->Write(fuse_path, offset, data);
     if (!res) {
@@ -249,9 +238,16 @@ StorageResult<size_t> CacheManager::WriteFile(
     }
     size_t bytes_written = res.value();
 
-    auto cache_tier_it = file_to_cache_.find(fuse_path);
-    if (cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+
+    if (cache_tier) {
         auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!inv_res) {
             spdlog::error("Failed to invalidate cache on write for {}: {}", fuse_path.string(), inv_res.error().message());
@@ -269,6 +265,7 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
         spdlog::warn("CreateFile failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     auto res = origin_->CreateFile(fuse_path, mode);
     if (!res) {
@@ -276,8 +273,15 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
         return std::unexpected(res.error());
     }
 
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+    if (cache_tier) {
         auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!inv_res) return std::unexpected(inv_res.error());
     }
@@ -291,15 +295,23 @@ StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_pa
         spdlog::warn("CreateDirectory failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     auto res = origin_->CreateDirectory(fuse_path, mode);
     if (!res) {
         spdlog::error("CreateDirectory failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
         return std::unexpected(res.error());
     }
-    
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
+
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+    if (cache_tier) {
         auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!inv_res) return std::unexpected(inv_res.error());
     }
@@ -313,6 +325,7 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
         spdlog::warn("Remove failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     auto res = origin_->Remove(fuse_path);
     if (!res) {
@@ -320,8 +333,15 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
         return std::unexpected(res.error());
     }
 
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+    if (cache_tier) {
         auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!inv_res) return std::unexpected(inv_res.error());
     }
@@ -335,15 +355,23 @@ StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path,
         spdlog::warn("TruncateFile failed: invalid path or size.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
-    
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
+
     auto res = origin_->Truncate(fuse_path, size);
     if (!res) {
         spdlog::error("TruncateFile failed for '{}' at origin: {}", fuse_path.string(), res.error().message());
         return std::unexpected(res.error());
     }
 
-    if (auto cache_tier_it = file_to_cache_.find(fuse_path); cache_tier_it != file_to_cache_.end()) {
-        auto& cache_tier = cache_tier_it->second;
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) {
+            cache_tier = it->second;
+        }
+    }
+    if (cache_tier) {
         auto inv_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!inv_res) return std::unexpected(inv_res.error());
     }
@@ -360,19 +388,35 @@ StorageResult<void> CacheManager::Move(
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
 
+    auto lock1 = GetFileLock(std::min(from_fuse_path, to_fuse_path));
+    auto lock2 = GetFileLock(std::max(from_fuse_path, to_fuse_path));
+    std::scoped_lock file_locks(*lock1, *lock2);
+
     auto res = origin_->Move(from_fuse_path, to_fuse_path);
     if (!res) {
         spdlog::error("Move failed for '{}'->'{}' at origin: {}", from_fuse_path.string(), to_fuse_path.string(), res.error().message());
         return std::unexpected(res.error());
     }
 
-    if (auto it = file_to_cache_.find(from_fuse_path); it != file_to_cache_.end()) {
-        auto inv_res = RemoveMetadataInvalidateCache(from_fuse_path, it->second);
+    std::shared_ptr<CacheTier> from_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(from_fuse_path);
+        if (it != file_to_cache_.end()) from_tier = it->second;
+    }
+    if (from_tier) {
+        auto inv_res = RemoveMetadataInvalidateCache(from_fuse_path, from_tier);
         if (!inv_res) return std::unexpected(inv_res.error());
     }
 
-    if (auto it = file_to_cache_.find(to_fuse_path); it != file_to_cache_.end()) {
-        auto inv_res = RemoveMetadataInvalidateCache(to_fuse_path, it->second);
+    std::shared_ptr<CacheTier> to_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(to_fuse_path);
+        if (it != file_to_cache_.end()) to_tier = it->second;
+    }
+    if (to_tier) {
+        auto inv_res = RemoveMetadataInvalidateCache(to_fuse_path, to_tier);
         if (!inv_res) return std::unexpected(inv_res.error());
     }
 
@@ -396,6 +440,7 @@ StorageResult<void> CacheManager::SetPermissions(const fs::path& fuse_path, mode
         spdlog::warn("SetPermissions failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
 
     auto origin_res = origin_->SetPermissions(fuse_path, mode);
     if (!origin_res) {
@@ -403,8 +448,14 @@ StorageResult<void> CacheManager::SetPermissions(const fs::path& fuse_path, mode
         return std::unexpected(origin_res.error());
     }
 
-    if (auto it = file_to_cache_.find(fuse_path); it != file_to_cache_.end()) {
-        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, it->second);
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) cache_tier = it->second;
+    }
+    if (cache_tier) {
+        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!invalidation_res) {
             spdlog::warn("SetPermissions: Failed to invalidate cache entry for {}: {}", fuse_path.string(), invalidation_res.error().message());
         }
@@ -419,15 +470,22 @@ StorageResult<void> CacheManager::SetOwner(const fs::path& fuse_path, uid_t uid,
         spdlog::warn("SetOwner failed: invalid path provided.");
         return std::unexpected(make_error_code(StorageErrc::InvalidPath));
     }
-    
+    std::lock_guard file_lock(*GetFileLock(fuse_path));
+
     auto origin_res = origin_->SetOwner(fuse_path, uid, gid);
     if (!origin_res) {
         spdlog::error("SetOwner failed for '{}' at origin: {}", fuse_path.string(), origin_res.error().message());
         return std::unexpected(origin_res.error());
     }
 
-    if (auto it = file_to_cache_.find(fuse_path); it != file_to_cache_.end()) {
-        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, it->second);
+    std::shared_ptr<CacheTier> cache_tier;
+    {
+        std::shared_lock r_lock(metadata_mutex_);
+        auto it = file_to_cache_.find(fuse_path);
+        if (it != file_to_cache_.end()) cache_tier = it->second;
+    }
+    if (cache_tier) {
+        auto invalidation_res = RemoveMetadataInvalidateCache(fuse_path, cache_tier);
         if (!invalidation_res) {
             spdlog::warn("SetOwner: Failed to invalidate cache entry for {}: {}", fuse_path.string(), invalidation_res.error().message());
         }
@@ -438,6 +496,18 @@ StorageResult<void> CacheManager::SetOwner(const fs::path& fuse_path, uid_t uid,
 //------------------------------------------------------------------------------//
 // Private Methods
 //------------------------------------------------------------------------------//
+
+std::shared_ptr<std::mutex> CacheManager::GetFileLock(const fs::path& path)
+{
+    std::lock_guard lock(file_locks_mutex_);
+    auto it = file_locks_.find(path);
+    if (it != file_locks_.end()) {
+        return it->second;
+    }
+    auto new_lock = std::make_shared<std::mutex>();
+    file_locks_[path] = new_lock;
+    return new_lock;
+}
 
 StorageResult<size_t> CacheManager::FetchAndTryCache(
     fs::path& fuse_path, off_t offset, std::span<std::byte>& buffer
@@ -462,17 +532,17 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
         spdlog::error("FetchAndTryCache failed to read from origin for '{}': {}", fuse_path.string(), read_res.error().message());
         return std::unexpected(read_res.error());
     }
-    
+
     const size_t bytes_for_caller = *read_res;
     const double fetch_cost_ms = static_cast<double>(elapsed.count()) > 0.0 ? static_cast<double>(elapsed.count()) : 1.0;
-    
+
     ItemMetadata meta{
         fuse_path,
         {0.0, fetch_cost_ms, std::time(nullptr)},
         {origin_attr->st_mtime, origin_attr->st_size}
     };
     meta.heat_metadata.heat = CacheTier::CalculateInitialItemHeat(fuse_path, meta);
-    
+
     auto tier_res = SelectCacheTierForWrite(meta);
     if (!tier_res) {
         spdlog::error("FetchAndTryCache failed: SelectCacheTierForWrite error: {}", tier_res.error().message());
@@ -517,7 +587,7 @@ StorageResult<size_t> CacheManager::FetchAndTryCache(
 
     std::unique_lock w_lock(metadata_mutex_);
     file_to_cache_[fuse_path] = tier;
-    
+
     return bytes_for_caller;
 }
 
@@ -553,8 +623,12 @@ StorageResult<void> CacheManager::RemoveMetadataInvalidateCache(
         spdlog::error("RemoveMetadataInvalidateCache failed for '{}': {}", fuse_path.string(), res.error().message());
         return std::unexpected(res.error());
     }
+
     std::unique_lock lock(metadata_mutex_);
-    file_to_cache_.erase(fuse_path);
+    auto it = file_to_cache_.find(fuse_path);
+    if (it != file_to_cache_.end() && it->second == cache_tier) {
+        file_to_cache_.erase(it);
+    }
     return {};
 }
 
@@ -622,7 +696,7 @@ StorageResult<void> CacheManager::TryPromoteItem(fs::path& fuse_path)
         if (!invalidate_res) {
             spdlog::warn("Failed to remove item from original tier after promotion: {}", invalidate_res.error().message());
         }
-        return {}; 
+        return {};
     }
 
     return {};
