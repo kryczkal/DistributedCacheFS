@@ -4,6 +4,7 @@ dist/
 .idea/
 .vscode/
 .cache/
+concat.conf
 
 .clang-format
 .clang-tidy

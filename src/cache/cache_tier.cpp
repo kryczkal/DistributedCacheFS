@@ -204,10 +204,14 @@ StorageResult<void> CacheTier::FreeUpSpace_impl(size_t required_space)
     for (auto it = by_heat.begin(); it != by_heat.end() && reclaimed < required_space;) {
         const fs::path victim = it->path;
         const size_t vsize = it->coherency_metadata.size_bytes;
-        it = by_heat.erase(it);
-
+        
         auto rm_res = storage_instance_->Remove(victim);
-        if (!rm_res) return std::unexpected(rm_res.error());
+        if (!rm_res) {
+            spdlog::error("FreeUpSpace failed to remove victim file {}: {}", victim.string(), rm_res.error().message());
+            return std::unexpected(rm_res.error());
+        }
+
+        it = by_heat.erase(it);
         reclaimed += vsize;
     }
 
@@ -299,24 +303,19 @@ StorageResult<void> CacheTier::InvalidateAndRemoveItem_impl(const fs::path &fuse
 {
     spdlog::debug("CacheTier::InvalidateAndRemoveItem_impl(tier={}, {})", cache_definition_.tier, fuse_path.string());
 
-    auto it = item_metadatas_.find(fuse_path);
-    if (it == item_metadatas_.end()) {
-        auto remove_res = storage_instance_->Remove(fuse_path);
-        if (!remove_res && remove_res.error() != make_error_code(StorageErrc::FileNotFound)) {
-            return std::unexpected(remove_res.error());
-        }
-        return {};
-    }
-
-    item_metadatas_.erase(it);
     auto remove_res = storage_instance_->Remove(fuse_path);
-    if (!remove_res) {
+    if (!remove_res && remove_res.error() != make_error_code(StorageErrc::FileNotFound)) {
         return std::unexpected(remove_res.error());
     }
 
-    if (mapping_cb_) {
-        mapping_cb_(fuse_path, shared_from_this(), false);
+    auto it = item_metadatas_.find(fuse_path);
+    if (it != item_metadatas_.end()) {
+        item_metadatas_.erase(it);
+        if (mapping_cb_) {
+            mapping_cb_(fuse_path, shared_from_this(), false);
+        }
     }
+
     return {};
 }
 
