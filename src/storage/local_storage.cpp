@@ -125,17 +125,12 @@ LocalStorage::LocalStorage(const Config::StorageDefinition& definition)
 {
 }
 
-Config::StorageType LocalStorage::GetType() const
-{
-    return definition_.type;
-}
+Config::StorageType LocalStorage::GetType() const { return definition_.type; }
 
-const std::filesystem::path& LocalStorage::GetPath() const
-{
-    return base_path_;
-}
+const std::filesystem::path& LocalStorage::GetPath() const { return base_path_; }
 
-std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::path& relative_path
+std::filesystem::path LocalStorage::RelativeToAbsPath(
+    const std::filesystem::path& relative_path
 ) const
 {
     std::error_code ec;
@@ -155,7 +150,8 @@ std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::pat
     }
     return full;
 }
-std::filesystem::path LocalStorage::GetValidatedFullPath(const std::filesystem::path& relative_path
+std::filesystem::path LocalStorage::GetValidatedFullPath(
+    const std::filesystem::path& relative_path
 ) const
 {
     auto full_path = RelativeToAbsPath(relative_path);
@@ -494,7 +490,9 @@ StorageResult<void> LocalStorage::PunchHole(
     }
     FileDescriptorGuard fd_guard(fd);
 
-    if (::fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, static_cast<off_t>(size)) == -1) {
+    if (::fallocate(
+            fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, static_cast<off_t>(size)
+        ) == -1) {
         return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
     }
 
@@ -528,7 +526,8 @@ StorageResult<void> LocalStorage::Fsync(
     return {};
 }
 
-StorageResult<bool> LocalStorage::CheckIfFileExists(const std::filesystem::path& relative_path
+StorageResult<bool> LocalStorage::CheckIfFileExists(
+    const std::filesystem::path& relative_path
 ) const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
@@ -670,7 +669,8 @@ StorageResult<void> LocalStorage::Move(
     return {};
 }
 
-StorageResult<struct stat> LocalStorage::GetAttributes(const std::filesystem::path& relative_path
+StorageResult<struct stat> LocalStorage::GetAttributes(
+    const std::filesystem::path& relative_path
 ) const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);

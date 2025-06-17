@@ -11,9 +11,7 @@
 namespace DistributedCacheFS::Cache
 {
 
-BlockManager::BlockManager()
-{
-}
+BlockManager::BlockManager() {}
 
 std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
     const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
@@ -75,13 +73,15 @@ std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
         if (overlap_start < overlap_end) {
             cached_regions.push_back({overlap_start, (size_t)(overlap_end - overlap_start)});
 
-            auto& heat_index         = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
-            auto eviction_it         = heat_index.find(std::make_tuple(file_id, block_offset));
+            auto& heat_index          = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+            auto eviction_it          = heat_index.find(std::make_tuple(file_id, block_offset));
             const auto& current_block = it->second;
 
             if (eviction_it != heat_index.end()) {
                 double new_heat = heat_updater(current_block, eviction_it->heat);
-                heat_index.modify(eviction_it, [&](EvictionCandidate& c) { c.heat = new_heat; });
+                heat_index.modify(eviction_it, [&](EvictionCandidate& c) {
+                    c.heat = new_heat;
+                });
             }
 
             item_index.modify(item_it, [&](ItemMetadata& item) {
@@ -113,16 +113,17 @@ void BlockManager::CacheRegion(
     if (item_it == item_index.end()) {
         item_it =
             item_index
-                .emplace(ItemMetadata{
-                    file_id, {access_path}, coherency_metadata, {}, base_fetch_cost_ms
-                })
+                .emplace(
+                    ItemMetadata{file_id, {access_path}, coherency_metadata, {}, base_fetch_cost_ms}
+                )
                 .first;
     } else {
-        item_index.modify(
-            item_it, [&](ItemMetadata& item) { item.known_paths.insert(access_path); }
-        );
+        item_index.modify(item_it, [&](ItemMetadata& item) {
+            item.known_paths.insert(access_path);
+        });
 
-        if (item_it->coherency_metadata.last_modified_time != coherency_metadata.last_modified_time ||
+        if (item_it->coherency_metadata.last_modified_time !=
+                coherency_metadata.last_modified_time ||
             item_it->coherency_metadata.size_bytes != coherency_metadata.size_bytes) {
             item_index.modify(item_it, [&](ItemMetadata& item) {
                 item.blocks.clear();
@@ -133,11 +134,11 @@ void BlockManager::CacheRegion(
     }
 
     BlockMetadata new_block{offset, size, time(nullptr), initial_heat};
-    item_index.modify(
-        item_it, [&](ItemMetadata& item) { item.blocks[offset] = new_block; }
-    );
+    item_index.modify(item_it, [&](ItemMetadata& item) {
+        item.blocks[offset] = new_block;
+    });
 
-    auto& heat_index  = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
     auto eviction_it = heat_index.find(std::make_tuple(file_id, offset));
     if (eviction_it != heat_index.end()) {
         heat_index.modify(eviction_it, [&](EvictionCandidate& c) {
@@ -146,9 +147,9 @@ void BlockManager::CacheRegion(
             c.path_for_storage = access_path;
         });
     } else {
-        eviction_queue_.emplace(EvictionCandidate{
-            file_id, access_path, offset, initial_heat, size
-        });
+        eviction_queue_.emplace(
+            EvictionCandidate{file_id, access_path, offset, initial_heat, size}
+        );
     }
 }
 
@@ -228,9 +229,9 @@ bool BlockManager::IsRegionWorthInserting(
         return true;
     }
 
-    size_t space_to_free = new_region_size - available_space;
+    size_t space_to_free        = new_region_size - available_space;
     size_t potential_free_space = 0;
-    auto& heat_index             = eviction_queue_.get<EvictionCandidate::ByHeat>();
+    auto& heat_index            = eviction_queue_.get<EvictionCandidate::ByHeat>();
 
     for (const auto& candidate : heat_index) {
         if (candidate.heat >= new_region_heat) {
@@ -319,10 +320,12 @@ void BlockManager::RefreshRandomHeats(
         if (block_it == item_it->blocks.end())
             continue;
 
-        double new_heat    = heat_updater(block_it->second, candidate.heat);
+        double new_heat  = heat_updater(block_it->second, candidate.heat);
         auto eviction_it = heat_idx.find(candidate);
         if (eviction_it != heat_idx.end()) {
-            heat_idx.modify(eviction_it, [&](EvictionCandidate& c) { c.heat = new_heat; });
+            heat_idx.modify(eviction_it, [&](EvictionCandidate& c) {
+                c.heat = new_heat;
+            });
         }
     }
 }
@@ -333,7 +336,9 @@ void BlockManager::AddLink(const FileId& file_id, const fs::path& new_path)
     auto& item_index = item_metadatas_.get<by_file_id>();
     auto item_it     = item_index.find(file_id);
     if (item_it != item_index.end()) {
-        item_index.modify(item_it, [&](ItemMetadata& item) { item.known_paths.insert(new_path); });
+        item_index.modify(item_it, [&](ItemMetadata& item) {
+            item.known_paths.insert(new_path);
+        });
     }
 }
 
@@ -365,11 +370,13 @@ void BlockManager::RenameLink(const FileId& file_id, const fs::path& from, const
         });
     }
 
-    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto& heat_index              = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
     auto [range_begin, range_end] = heat_index.equal_range(file_id);
     for (auto it = range_begin; it != range_end; ++it) {
         if (it->path_for_storage == from) {
-            heat_index.modify(it, [&](EvictionCandidate& c) { c.path_for_storage = to; });
+            heat_index.modify(it, [&](EvictionCandidate& c) {
+                c.path_for_storage = to;
+            });
         }
     }
 }

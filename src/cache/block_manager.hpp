@@ -25,8 +25,7 @@ namespace DistributedCacheFS::Cache
 namespace fs  = std::filesystem;
 namespace bmi = boost::multi_index;
 
-struct ItemMetadata
-{
+struct ItemMetadata {
     FileId file_id;
     std::set<fs::path> known_paths;
     CoherencyMetadata coherency_metadata;
@@ -37,8 +36,7 @@ struct ItemMetadata
 class BlockManager
 {
     private:
-    struct by_file_id
-    {
+    struct by_file_id {
     };
     using ItemMetadataContainer = bmi::multi_index_container<
         ItemMetadata,

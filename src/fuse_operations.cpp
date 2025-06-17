@@ -74,7 +74,7 @@ int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/
     auto result    = manager->GetAttributes(fuse_path);
 
     if (result.has_value()) {
-        *stbuf          = result.value();
+        *stbuf = result.value();
     } else {
         spdlog::warn("FUSE getattr failed for path {}: {}", path, result.error().message());
         return Storage::StorageResultToErrno(result);
@@ -288,7 +288,7 @@ int open(const char *path, struct fuse_file_info *fi)
             // It doesn't exist, so we are clear to create it.
             // A default mode for new files. FUSE doesn't provide one in open().
             mode_t create_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
-            auto create_res = manager->CreateFile(fuse_path, create_mode);
+            auto create_res    = manager->CreateFile(fuse_path, create_mode);
             if (!create_res) {
                 return Storage::StorageResultToErrno(create_res);
             }
@@ -498,7 +498,7 @@ int opendir(const char *path, struct fuse_file_info *fi)
     if (!S_ISDIR(result.value().st_mode)) {
         return -ENOTDIR;
     }
-    
+
     struct fuse_context *ctx = fuse_get_context();
     if (!ctx) {
         spdlog::error("opendir: missing FUSE context");

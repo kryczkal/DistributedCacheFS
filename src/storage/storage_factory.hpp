@@ -38,7 +38,8 @@ class StorageFactory
             case Config::StorageType::Local:
                 return std::make_unique<LocalStorage>(definition);
             case Config::StorageType::Shared:
-                return std::unexpected(make_error_code(StorageErrc::NotSupported)
+                return std::unexpected(
+                    make_error_code(StorageErrc::NotSupported)
                 );  // Not implemented yet
             default:
                 return std::unexpected(make_error_code(StorageErrc::NotSupported));

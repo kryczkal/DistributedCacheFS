@@ -24,8 +24,8 @@ namespace fs = std::filesystem;
 class FileLockManager
 {
     public:
-    FileLockManager()                                  = default;
-    ~FileLockManager()                                 = default;
+    FileLockManager()  = default;
+    ~FileLockManager() = default;
 
     FileLockManager(const FileLockManager&)            = delete;
     FileLockManager& operator=(const FileLockManager&) = delete;

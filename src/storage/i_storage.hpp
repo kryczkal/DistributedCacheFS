@@ -28,7 +28,7 @@ class IStorage
     public:
     virtual ~IStorage() = default;
 
-    [[nodiscard]] virtual Config::StorageType GetType() const = 0;
+    [[nodiscard]] virtual Config::StorageType GetType() const          = 0;
     [[nodiscard]] virtual const std::filesystem::path& GetPath() const = 0;
 
     [[nodiscard]] virtual StorageResult<std::size_t> GetCapacityBytes() const  = 0;
@@ -57,10 +57,12 @@ class IStorage
         const std::filesystem::path& relative_path, bool is_data_sync
     ) = 0;
 
-    virtual StorageResult<bool> CheckIfFileExists(const std::filesystem::path& relative_path
+    virtual StorageResult<bool> CheckIfFileExists(
+        const std::filesystem::path& relative_path
     ) const = 0;
 
-    virtual StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
+    virtual StorageResult<struct stat> GetAttributes(
+        const std::filesystem::path& relative_path
     ) const = 0;
 
     virtual StorageResult<struct statvfs> GetFilesystemStats(const std::string& path) const = 0;
@@ -110,7 +112,8 @@ class IStorage
     virtual StorageResult<void> Initialize() = 0;
     virtual StorageResult<void> Shutdown()   = 0;
 
-    virtual std::filesystem::path RelativeToAbsPath(const std::filesystem::path& relative_path
+    virtual std::filesystem::path RelativeToAbsPath(
+        const std::filesystem::path& relative_path
     ) const = 0;
 };
 

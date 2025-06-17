@@ -65,7 +65,9 @@ class CacheManager
     );
 
     StorageResult<void> CreateFile(std::filesystem::path& fuse_path, mode_t mode);
-    StorageResult<void> CreateSpecialFile(std::filesystem::path& fuse_path, mode_t mode, dev_t rdev);
+    StorageResult<void> CreateSpecialFile(
+        std::filesystem::path& fuse_path, mode_t mode, dev_t rdev
+    );
     StorageResult<void> CreateDirectory(std::filesystem::path& fuse_path, mode_t mode);
     StorageResult<void> Remove(std::filesystem::path& fuse_path);
     StorageResult<void> TruncateFile(std::filesystem::path& fuse_path, off_t size);

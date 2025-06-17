@@ -51,9 +51,8 @@ class CacheTier
     );
 
     StorageResult<void> CacheRegion(
-        const FileId& file_id, const fs::path& access_path, off_t offset,
-        std::span<std::byte> data, const CoherencyMetadata& coherency_metadata,
-        double base_fetch_cost_ms
+        const FileId& file_id, const fs::path& access_path, off_t offset, std::span<std::byte> data,
+        const CoherencyMetadata& coherency_metadata, double base_fetch_cost_ms
     );
 
     StorageResult<bool> IsRegionWorthInserting(double new_region_heat, size_t new_region_size);

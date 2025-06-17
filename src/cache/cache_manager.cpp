@@ -105,7 +105,7 @@ StorageResult<size_t> CacheManager::ReadFile(
     if (!origin_meta_res)
         return std::unexpected(origin_meta_res.error());
     CoherencyMetadata origin_meta = origin_meta_res.value();
-    auto attr_res = origin_->GetAttributes(fuse_path);
+    auto attr_res                 = origin_->GetAttributes(fuse_path);
     if (!attr_res)
         return std::unexpected(attr_res.error());
     FileId file_id{attr_res->st_dev, attr_res->st_ino};
@@ -116,8 +116,10 @@ StorageResult<size_t> CacheManager::ReadFile(
     if (size_to_read == 0)
         return 0;
 
-    RegionList missing_regions = {{offset, size_to_read}};
-    size_t bytes_from_cache    = 0;
+    RegionList missing_regions = {
+        {offset, size_to_read}
+    };
+    size_t bytes_from_cache = 0;
 
     std::vector<std::shared_ptr<CacheTier>> tiers_with_data;
     for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
@@ -142,14 +144,16 @@ StorageResult<size_t> CacheManager::ReadFile(
                     tier->GetStats().IncrementHits();
                 }
                 for (const auto& r : cached) {
-                    off_t buffer_start_at        = r.first - offset;
+                    off_t buffer_start_at = r.first - offset;
                     std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, r.second};
                     auto read_res = tier->GetStorage()->Read(fuse_path, r.first, sub_buffer);
                     if (read_res)
                         bytes_from_cache += *read_res;
                     TryPromoteBlock(file_id, fuse_path, r.first, r.second, tier);
                 }
-                current_tier_missing.insert(current_tier_missing.end(), missing.begin(), missing.end());
+                current_tier_missing.insert(
+                    current_tier_missing.end(), missing.begin(), missing.end()
+                );
             } else {
                 current_tier_missing.push_back(missing_region);
             }
@@ -165,9 +169,11 @@ StorageResult<size_t> CacheManager::ReadFile(
 
         std::vector<std::future<StorageResult<size_t>>> futures;
         for (const auto& region : missing_regions) {
-            off_t buffer_start_at        = region.first - offset;
+            off_t buffer_start_at = region.first - offset;
             std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, region.second};
-            futures.push_back(io_manager_->SubmitRead(origin_, fuse_path, region.first, sub_buffer));
+            futures.push_back(
+                io_manager_->SubmitRead(origin_, fuse_path, region.first, sub_buffer)
+            );
         }
         for (size_t i = 0; i < futures.size(); ++i) {
             auto start_time = std::chrono::steady_clock::now();
@@ -179,21 +185,22 @@ StorageResult<size_t> CacheManager::ReadFile(
                 size_t bytes_actually_read = *res;
 
                 if (bytes_actually_read > 0) {
-                    off_t region_offset = missing_regions[i].first;
-                    double fetch_cost_ms =
-                        std::max(1.0, static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        end_time - start_time
-                                    )
-                                        .count()));
+                    off_t region_offset  = missing_regions[i].first;
+                    double fetch_cost_ms = std::max(
+                        1.0,
+                        static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                end_time - start_time
+                        )
+                                                .count())
+                    );
 
                     off_t buffer_start_at = region_offset - offset;
                     std::vector<std::byte> data_to_cache(bytes_actually_read);
-                    std::copy_n(buffer.data() + buffer_start_at, bytes_actually_read, data_to_cache.begin());
+                    std::copy_n(
+                        buffer.data() + buffer_start_at, bytes_actually_read, data_to_cache.begin()
+                    );
 
-                    io_manager_->SubmitTask([this,
-                                             file_id,
-                                             fuse_path,
-                                             region_offset,
+                    io_manager_->SubmitTask([this, file_id, fuse_path, region_offset,
                                              data_to_cache = std::move(data_to_cache),
                                              fetch_cost_ms]() mutable {
                         this->CacheRegionAsync(
@@ -241,7 +248,7 @@ void CacheManager::InvalidateAndPurgeByPath(const fs::path& fuse_path)
 {
     auto attr_res = origin_->GetAttributes(fuse_path);
     if (!attr_res) {
-        return; // File doesn't exist, nothing to do.
+        return;  // File doesn't exist, nothing to do.
     }
     FileId file_id{attr_res->st_dev, attr_res->st_ino};
 
@@ -259,7 +266,7 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 
     auto attr_res_before = origin_->GetAttributes(fuse_path);
     if (!attr_res_before) {
-        return {}; // Already gone
+        return {};  // Already gone
     }
     FileId file_id{attr_res_before->st_dev, attr_res_before->st_ino};
 
@@ -269,8 +276,7 @@ StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
     }
 
     auto attr_res_after = origin_->GetAttributes(fuse_path);
-    bool is_last_link   = !attr_res_after.has_value() ||
-                        (attr_res_after->st_ino != file_id.st_ino);
+    bool is_last_link   = !attr_res_after.has_value() || (attr_res_after->st_ino != file_id.st_ino);
 
     for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
         for (const auto& tier : it->second) {
@@ -332,7 +338,7 @@ StorageResult<void> CacheManager::Move(
     }
     FileId file_id{attr_res->st_dev, attr_res->st_ino};
 
-    InvalidateAndPurgeByPath(to_fuse_path); // Invalidate destination if it exists
+    InvalidateAndPurgeByPath(to_fuse_path);  // Invalidate destination if it exists
 
     auto res = origin_->Move(from_fuse_path, to_fuse_path);
     if (res) {
@@ -359,7 +365,7 @@ StorageResult<void> CacheManager::CreateHardLink(const fs::path& from_path, cons
     }
     FileId file_id{attr_res->st_dev, attr_res->st_ino};
 
-    InvalidateAndPurgeByPath(to_path); // Invalidate destination if it exists
+    InvalidateAndPurgeByPath(to_path);  // Invalidate destination if it exists
 
     auto link_res = origin_->CreateHardLink(from_path, to_path);
     if (link_res) {
@@ -389,7 +395,8 @@ StorageResult<void> CacheManager::Fsync(const fs::path& fuse_path, bool is_data_
         for (const auto& tier : it->second) {
             if (tier->GetItemMetadata(file_id)) {
                 auto res = tier->GetStorage()->Fsync(fuse_path, is_data_sync);
-                if (!res) return res;
+                if (!res)
+                    return res;
             }
         }
     }
@@ -462,8 +469,8 @@ std::shared_ptr<std::recursive_mutex> CacheManager::GetFileLock(const fs::path& 
 }
 
 void CacheManager::CacheRegionAsync(
-    const FileId& file_id, const fs::path& fuse_path, off_t offset, std::vector<std::byte> region_data,
-    double fetch_cost_ms
+    const FileId& file_id, const fs::path& fuse_path, off_t offset,
+    std::vector<std::byte> region_data, double fetch_cost_ms
 )
 {
     if (region_data.empty())
@@ -474,7 +481,9 @@ void CacheManager::CacheRegionAsync(
 
     auto origin_meta_res = GetOriginCoherencyMetadata(fuse_path);
     if (!origin_meta_res) {
-        spdlog::warn("CacheRegionAsync for {} failed: could not get origin metadata.", fuse_path.string());
+        spdlog::warn(
+            "CacheRegionAsync for {} failed: could not get origin metadata.", fuse_path.string()
+        );
         return;
     }
 
@@ -486,7 +495,9 @@ void CacheManager::CacheRegionAsync(
         }
     }
     if (!best_tier) {
-        spdlog::debug("CacheRegionAsync for {}: no cache tiers available to cache to.", fuse_path.string());
+        spdlog::debug(
+            "CacheRegionAsync for {}: no cache tiers available to cache to.", fuse_path.string()
+        );
         return;
     }
 
@@ -501,7 +512,8 @@ void CacheManager::CacheRegionAsync(
             );
         } else {
             spdlog::debug(
-                "CacheRegionAsync for {}: no suitable cache tier found or region not worth inserting.",
+                "CacheRegionAsync for {}: no suitable cache tier found or region not worth "
+                "inserting.",
                 fuse_path.string()
             );
         }
@@ -513,12 +525,11 @@ void CacheManager::CacheRegionAsync(
         tier->CacheRegion(file_id, fuse_path, offset, region_span, *origin_meta_res, fetch_cost_ms);
     if (!cache_res) {
         spdlog::warn(
-            "CacheRegionAsync for {} failed: tier->CacheRegion returned an error: {}", fuse_path.string(),
-            cache_res.error().message()
+            "CacheRegionAsync for {} failed: tier->CacheRegion returned an error: {}",
+            fuse_path.string(), cache_res.error().message()
         );
     }
 }
-
 
 void CacheManager::TryPromoteBlock(
     const FileId& file_id, const fs::path& fuse_path, off_t offset, size_t size,
@@ -543,7 +554,8 @@ void CacheManager::TryPromoteBlock(
 
     destination_tier->GetStats().IncrementPromotions();
 
-    io_manager_->SubmitTask([this, file_id, fuse_path, offset, size, source_tier, destination_tier]() mutable {
+    io_manager_->SubmitTask([this, file_id, fuse_path, offset, size, source_tier,
+                             destination_tier]() mutable {
         std::vector<std::byte> data_buffer(size);
         std::span<std::byte> buffer_span{data_buffer};
 
@@ -566,7 +578,7 @@ void CacheManager::TryPromoteBlock(
         }
 
         const double base_fetch_cost_ms = 1.0;
-        auto cache_res = destination_tier->CacheRegion(
+        auto cache_res                  = destination_tier->CacheRegion(
             file_id, fuse_path, offset, buffer_span, *origin_meta_res, base_fetch_cost_ms
         );
 

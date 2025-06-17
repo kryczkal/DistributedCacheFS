@@ -22,7 +22,7 @@ class ITierSelector
 class DefaultTierSelector : public ITierSelector
 {
     public:
-    DefaultTierSelector()          = default;
+    DefaultTierSelector()           = default;
     ~DefaultTierSelector() override = default;
 
     Storage::StorageResult<std::shared_ptr<CacheTier>> SelectTierForWrite(

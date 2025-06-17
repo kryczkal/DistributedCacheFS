@@ -8,7 +8,9 @@ namespace DistributedCacheFS
 AsyncIoManager::AsyncIoManager(size_t num_threads)
 {
     for (size_t i = 0; i < num_threads; ++i) {
-        workers_.emplace_back([this] { this->WorkerThread(); });
+        workers_.emplace_back([this] {
+            this->WorkerThread();
+        });
     }
 }
 
@@ -31,7 +33,9 @@ void AsyncIoManager::WorkerThread()
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            condition_.wait(lock, [this] { return this->stop_ || !this->tasks_.empty(); });
+            condition_.wait(lock, [this] {
+                return this->stop_ || !this->tasks_.empty();
+            });
             if (this->stop_ && this->tasks_.empty()) {
                 return;
             }
@@ -60,13 +64,16 @@ std::future<AsyncIoManager::ReadResult> AsyncIoManager::SubmitRead(
     std::span<std::byte> buffer
 )
 {
-    auto task_ptr = std::make_shared<std::packaged_task<ReadResult()>>(
-        [storage, path, offset, buffer]() mutable { return storage->Read(path, offset, buffer); }
-    );
+    auto task_ptr = std::make_shared<std::packaged_task<ReadResult()>>([storage, path, offset,
+                                                                        buffer]() mutable {
+        return storage->Read(path, offset, buffer);
+    });
 
     std::future<ReadResult> future = task_ptr->get_future();
 
-    SubmitTask([task_ptr]() { (*task_ptr)(); });
+    SubmitTask([task_ptr]() {
+        (*task_ptr)();
+    });
 
     return future;
 }
