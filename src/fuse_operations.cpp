@@ -75,8 +75,6 @@ int getattr(const char *path, struct stat *stbuf, struct fuse_file_info * /*fi*/
 
     if (result.has_value()) {
         *stbuf          = result.value();
-        stbuf->st_atime = time(nullptr);
-        stbuf->st_ctime = stbuf->st_atime;
     } else {
         spdlog::warn("FUSE getattr failed for path {}: {}", path, result.error().message());
         return Storage::StorageResultToErrno(result);
@@ -192,9 +190,10 @@ int rename(const char *from_path, const char *to_path, unsigned int flags)
     if (!manager)
         return -EIO;
 
-    // TODO: Check flags
     if (flags != 0) {
-        spdlog::warn("FUSE rename flags ({}) ignored.", flags);
+        spdlog::warn("FUSE rename flags ({}) are not supported and will be ignored.", flags);
+        // RENAME_EXCHANGE and RENAME_NOREPLACE would require more complex logic.
+        // For now, we proceed as if flags=0.
     }
 
     auto from_fuse_path = FuseOps::get_fuse_path(from_path);
@@ -205,8 +204,15 @@ int rename(const char *from_path, const char *to_path, unsigned int flags)
 
 int link(const char *oldpath, const char *newpath)
 {
-    spdlog::debug("FUSE link called for old {}, new {}, but not implemented.", oldpath, newpath);
-    return -ENOSYS;
+    spdlog::debug("FUSE link called for old {}, new {}", oldpath, newpath);
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+
+    auto from_fuse_path = FuseOps::get_fuse_path(oldpath);
+    auto to_fuse_path   = FuseOps::get_fuse_path(newpath);
+    auto result         = manager->CreateHardLink(from_fuse_path, to_fuse_path);
+    return Storage::StorageResultToErrno(result);
 }
 
 int chmod(const char *path, mode_t mode, struct fuse_file_info * /*fi*/)
@@ -270,7 +276,7 @@ int open(const char *path, struct fuse_file_info *fi)
     auto attr_res = manager->GetAttributes(fuse_path);
     if (!attr_res) {
         int err = Storage::StorageResultToErrno(attr_res);
-        if ((oflags & O_CREAT) && (oflags & O_EXCL) && err == -ENOENT)
+        if ((oflags & O_CREAT) && err == -ENOENT)
             return -EIO;  // create failed mysteriously
         return err;
     }
@@ -293,8 +299,6 @@ int open(const char *path, struct fuse_file_info *fi)
             req = R_OK | W_OK;
             break;
     }
-    if (S_ISDIR(st.st_mode))
-        req |= X_OK;  // need search permission
 
     struct fuse_context *ctx = fuse_get_context();
     if (!ctx) {
@@ -470,14 +474,14 @@ int opendir(const char *path, struct fuse_file_info *fi)
     if (!S_ISDIR(result.value().st_mode)) {
         return -ENOTDIR;
     }
-
+    
     struct fuse_context *ctx = fuse_get_context();
     if (!ctx) {
         spdlog::error("opendir: missing FUSE context");
         return -EIO;
     }
 
-    auto perm_res = manager->CheckPermissions(fuse_path, X_OK, ctx->uid, ctx->gid);
+    auto perm_res = manager->CheckPermissions(fuse_path, R_OK | X_OK, ctx->uid, ctx->gid);
     if (!perm_res) {
         spdlog::debug(
             "FUSE opendir: Permission denied for path {}, mode {:#o}", path, result.value().st_mode

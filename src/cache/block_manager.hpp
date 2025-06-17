@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <shared_mutex>
 #include <vector>
 
@@ -26,7 +27,8 @@ namespace bmi = boost::multi_index;
 
 struct ItemMetadata
 {
-    fs::path path;
+    FileId file_id;
+    std::set<fs::path> known_paths;
     CoherencyMetadata coherency_metadata;
     std::map<off_t, BlockMetadata> blocks;
     double base_fetch_cost_ms = 1.0;
@@ -35,13 +37,13 @@ struct ItemMetadata
 class BlockManager
 {
     private:
-    struct by_path
+    struct by_file_id
     {
     };
     using ItemMetadataContainer = bmi::multi_index_container<
         ItemMetadata,
-        bmi::indexed_by<
-            bmi::hashed_unique<bmi::tag<by_path>, bmi::member<ItemMetadata, fs::path, &ItemMetadata::path>>>>;
+        bmi::indexed_by<bmi::hashed_unique<
+            bmi::tag<by_file_id>, bmi::member<ItemMetadata, FileId, &ItemMetadata::file_id>>>>;
 
     using EvictionQueue = bmi::multi_index_container<
         EvictionCandidate,
@@ -50,10 +52,10 @@ class BlockManager
                 bmi::tag<EvictionCandidate::ByHeat>,
                 bmi::member<EvictionCandidate, double, &EvictionCandidate::heat>>,
             bmi::hashed_unique<
-                bmi::tag<EvictionCandidate::ByPathAndOffset>,
+                bmi::tag<EvictionCandidate::ByFileIdAndOffset>,
                 bmi::composite_key<
                     EvictionCandidate,
-                    bmi::member<EvictionCandidate, fs::path, &EvictionCandidate::path>,
+                    bmi::member<EvictionCandidate, FileId, &EvictionCandidate::file_id>,
                     bmi::member<EvictionCandidate, off_t, &EvictionCandidate::offset>>>>>;
 
     public:
@@ -66,21 +68,22 @@ class BlockManager
     BlockManager& operator=(BlockManager&&)      = delete;
 
     std::pair<RegionList, RegionList> GetCachedRegionsAndUpdateHeat(
-        const fs::path& fuse_path, off_t offset, size_t size, const CoherencyMetadata& origin_metadata,
+        const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
+        const CoherencyMetadata& origin_metadata,
         std::function<double(const BlockMetadata&, double)> heat_updater,
-        std::function<void(const fs::path&)> on_stale_item
+        std::function<void(const FileId&)> on_stale_item
     );
 
     void CacheRegion(
-        const fs::path& fuse_path, off_t offset, size_t size, double initial_heat,
-        double base_fetch_cost_ms, const CoherencyMetadata& coherency_metadata
+        const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
+        double initial_heat, double base_fetch_cost_ms, const CoherencyMetadata& coherency_metadata
     );
 
-    std::vector<BlockMetadata> InvalidateRegion(const fs::path& fuse_path, off_t offset, size_t size);
+    std::vector<BlockMetadata> InvalidateRegion(const FileId& file_id, off_t offset, size_t size);
 
-    void InvalidateAndRemoveItem(const fs::path& fuse_path);
+    std::vector<BlockMetadata> InvalidateAndRemoveItem(const FileId& file_id);
 
-    std::optional<ItemMetadata> GetItemMetadata(const fs::path& fuse_path);
+    std::optional<ItemMetadata> GetItemMetadata(const FileId& file_id);
 
     bool IsRegionWorthInserting(
         double new_region_heat, size_t new_region_size, uint64_t available_space,
@@ -91,9 +94,13 @@ class BlockManager
 
     void RemoveEvictionVictims(const std::vector<EvictionCandidate>& victims);
 
-    private:
-    void RefreshRandomHeats_impl(std::function<double(const BlockMetadata&, double)> heat_updater);
+    void RefreshRandomHeats(std::function<double(const BlockMetadata&, double)> heat_updater);
 
+    void AddLink(const FileId& file_id, const fs::path& new_path);
+    bool RemoveLink(const FileId& file_id, const fs::path& path_to_remove);
+    void RenameLink(const FileId& file_id, const fs::path& from, const fs::path& to);
+
+    private:
     ItemMetadataContainer item_metadatas_;
     EvictionQueue eviction_queue_;
     mutable std::shared_mutex metadata_mutex_;

@@ -573,6 +573,35 @@ StorageResult<void> LocalStorage::CreateDirectory(
     return {};
 }
 
+StorageResult<void> LocalStorage::CreateHardLink(
+    const std::filesystem::path& from_relative_path, const std::filesystem::path& to_relative_path
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto from_full = GetValidatedFullPath(from_relative_path);
+    if (from_full.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    auto to_full = GetValidatedFullPath(to_relative_path);
+    if (to_full.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    std::error_code ec;
+    auto parent = to_full.parent_path();
+    if (!parent.empty() && !fs::exists(parent, ec)) {
+        fs::create_directories(parent, ec);
+        if (ec)
+            return std::unexpected(MapFilesystemError(ec, "link_create_parent"));
+    } else if (ec) {
+        return std::unexpected(MapFilesystemError(ec, "link_check_parent"));
+    }
+
+    if (::link(from_full.c_str(), to_full.c_str()) == -1) {
+        return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+    }
+
+    return {};
+}
+
 StorageResult<void> LocalStorage::Move(
     const std::filesystem::path& from_relative_path, const std::filesystem::path& to_relative_path
 )

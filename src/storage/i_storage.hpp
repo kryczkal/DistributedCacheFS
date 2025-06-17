@@ -77,6 +77,10 @@ class IStorage
         const std::filesystem::path& relative_path, mode_t mode
     ) = 0;
 
+    virtual StorageResult<void> CreateHardLink(
+        const fs::path& from_relative_path, const fs::path& to_relative_path
+    ) = 0;
+
     virtual StorageResult<void> Move(
         const fs::path& from_relative_path, const fs::path& to_relative_path
     ) = 0;

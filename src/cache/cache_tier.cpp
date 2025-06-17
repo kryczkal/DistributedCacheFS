@@ -53,17 +53,18 @@ StorageResult<std::uint64_t> CacheTier::GetAvailableBytes() const
 }
 
 StorageResult<std::pair<RegionList, RegionList>> CacheTier::GetCachedRegions(
-    const fs::path& fuse_path, off_t offset, size_t size, const CoherencyMetadata& origin_metadata
+    const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
+    const CoherencyMetadata& origin_metadata
 )
 {
     auto heat_updater = [this](const BlockMetadata& block, double current_heat) {
         return this->CalculateRegionHeat(current_heat, block.last_access_time, std::time(nullptr));
     };
 
-    auto on_stale_item = [this](const fs::path& p) { this->InvalidateAndRemoveItem(p); };
+    auto on_stale_item = [this](const FileId& id) { this->InvalidateAndPurgeItem(id); };
 
     auto result = block_manager_->GetCachedRegionsAndUpdateHeat(
-        fuse_path, offset, size, origin_metadata, heat_updater, on_stale_item
+        file_id, access_path, offset, size, origin_metadata, heat_updater, on_stale_item
     );
 
     if (result && !result->first.empty()) {
@@ -78,21 +79,24 @@ StorageResult<std::pair<RegionList, RegionList>> CacheTier::GetCachedRegions(
 }
 
 StorageResult<void> CacheTier::CacheRegion(
-    const fs::path& fuse_path, off_t offset, std::span<std::byte> data,
-    const CoherencyMetadata& coherency_metadata, double base_fetch_cost_ms
+    const FileId& file_id, const fs::path& access_path, off_t offset,
+    std::span<std::byte> data, const CoherencyMetadata& coherency_metadata,
+    double base_fetch_cost_ms
 )
 {
     if (auto res = FreeUpSpace(data.size()); !res) {
         return std::unexpected(res.error());
     }
 
-    auto write_res = storage_instance_->Write(fuse_path, offset, data);
-    if (!write_res) return std::unexpected(write_res.error());
+    auto write_res = storage_instance_->Write(access_path, offset, data);
+    if (!write_res)
+        return std::unexpected(write_res.error());
 
     double initial_heat = CalculateInitialRegionHeat(base_fetch_cost_ms, data.size());
 
     block_manager_->CacheRegion(
-        fuse_path, offset, data.size(), initial_heat, base_fetch_cost_ms, coherency_metadata
+        file_id, access_path, offset, data.size(), initial_heat, base_fetch_cost_ms,
+        coherency_metadata
     );
 
     return {};
@@ -101,7 +105,8 @@ StorageResult<void> CacheTier::CacheRegion(
 StorageResult<bool> CacheTier::IsRegionWorthInserting(double new_region_heat, size_t new_region_size)
 {
     auto avail_res = GetAvailableBytes();
-    if (!avail_res) return std::unexpected(avail_res.error());
+    if (!avail_res)
+        return std::unexpected(avail_res.error());
 
     auto heat_updater = [this](const BlockMetadata& block, double current_heat) {
         return this->CalculateRegionHeat(current_heat, block.last_access_time, std::time(nullptr));
@@ -115,9 +120,11 @@ StorageResult<bool> CacheTier::IsRegionWorthInserting(double new_region_heat, si
 StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
 {
     auto avail_res = GetAvailableBytes();
-    if (!avail_res) return std::unexpected(avail_res.error());
+    if (!avail_res)
+        return std::unexpected(avail_res.error());
     size_t space_to_free = (*avail_res >= required_space) ? 0 : required_space - *avail_res;
-    if (space_to_free == 0) return {};
+    if (space_to_free == 0)
+        return {};
 
     auto victims = block_manager_->GetVictimsForEviction(space_to_free);
     if (victims.empty() && space_to_free > 0) {
@@ -135,7 +142,8 @@ StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
     stats_.AddItemsEvicted(victims.size());
 
     for (const auto& victim : victims) {
-        auto punch_res = storage_instance_->PunchHole(victim.path, victim.offset, victim.size);
+        auto punch_res =
+            storage_instance_->PunchHole(victim.path_for_storage, victim.offset, victim.size);
         if (!punch_res) {
             return std::unexpected(punch_res.error());
         }
@@ -146,40 +154,65 @@ StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
     return {};
 }
 
-StorageResult<void> CacheTier::InvalidateAndRemoveItem(const fs::path& fuse_path)
+StorageResult<void> CacheTier::InvalidateAndPurgeItem(const FileId& file_id)
 {
-    block_manager_->InvalidateAndRemoveItem(fuse_path);
+    auto item_meta_res = block_manager_->GetItemMetadata(file_id);
 
-    auto remove_res = storage_instance_->Remove(fuse_path);
-    if (!remove_res && remove_res.error() != make_error_code(StorageErrc::FileNotFound)) {
-        return std::unexpected(remove_res.error());
+    auto blocks_to_punch = block_manager_->InvalidateAndRemoveItem(file_id);
+
+    if (item_meta_res.has_value() && !item_meta_res->known_paths.empty()) {
+        const fs::path& representative_path = *item_meta_res->known_paths.begin();
+
+        for (const auto& block : blocks_to_punch) {
+            storage_instance_->PunchHole(representative_path, block.offset, block.size);
+        }
+        storage_instance_->Remove(representative_path);
     }
 
     return {};
 }
 
-StorageResult<void> CacheTier::InvalidateRegion(const fs::path& fuse_path, off_t offset, size_t size)
+StorageResult<void> CacheTier::InvalidateRegion(
+    const FileId& file_id, const fs::path& access_path, off_t offset, size_t size
+)
 {
-    auto blocks_to_punch = block_manager_->InvalidateRegion(fuse_path, offset, size);
+    auto blocks_to_punch = block_manager_->InvalidateRegion(file_id, offset, size);
 
     for (const auto& block : blocks_to_punch) {
-        storage_instance_->PunchHole(fuse_path, block.offset, block.size);
+        storage_instance_->PunchHole(access_path, block.offset, block.size);
     }
     return {};
 }
 
-StorageResult<ItemMetadata> CacheTier::GetItemMetadata(const fs::path& fuse_path)
+StorageResult<ItemMetadata> CacheTier::GetItemMetadata(const FileId& file_id)
 {
-    auto res = block_manager_->GetItemMetadata(fuse_path);
+    auto res = block_manager_->GetItemMetadata(file_id);
     if (!res.has_value()) {
         return std::unexpected(make_error_code(StorageErrc::MetadataNotFound));
     }
     return res.value();
 }
 
+void CacheTier::AddLink(const FileId& file_id, const fs::path& new_path)
+{
+    block_manager_->AddLink(file_id, new_path);
+}
+
+bool CacheTier::RemoveLink(const FileId& file_id, const fs::path& path_to_remove)
+{
+    return block_manager_->RemoveLink(file_id, path_to_remove);
+}
+
+void CacheTier::RenameLink(const FileId& file_id, const fs::path& from, const fs::path& to)
+{
+    block_manager_->RenameLink(file_id, from, to);
+    storage_instance_->Move(from, to);
+}
+
 double CacheTier::CalculateInitialRegionHeat(double fetch_cost_ms, size_t region_size) const
 {
-    if (region_size == 0) return 0.0;
+    if (region_size == 0)
+        return 0.0;
     return fetch_cost_ms / static_cast<double>(region_size);
 }
 

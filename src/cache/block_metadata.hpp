@@ -18,13 +18,32 @@ class CacheTier;
 namespace fs = std::filesystem;
 
 using TierToCacheMap = std::map<size_t, std::vector<std::shared_ptr<CacheTier>>>;
-using Region = std::pair<off_t, size_t>;
-using RegionList = std::vector<Region>;
+using Region         = std::pair<off_t, size_t>;
+using RegionList     = std::vector<Region>;
 
 struct CoherencyMetadata
 {
     time_t last_modified_time;
     off_t size_bytes;
+};
+
+struct FileId
+{
+    dev_t st_dev;
+    ino_t st_ino;
+
+    bool operator==(const FileId& other) const
+    {
+        return st_dev == other.st_dev && st_ino == other.st_ino;
+    }
+
+    bool operator<(const FileId& other) const
+    {
+        if (st_dev != other.st_dev) {
+            return st_dev < other.st_dev;
+        }
+        return st_ino < other.st_ino;
+    }
 };
 
 struct BlockMetadata
@@ -42,7 +61,8 @@ struct BlockMetadata
 
 struct EvictionCandidate
 {
-    fs::path path;
+    FileId file_id;
+    fs::path path_for_storage;  // The path to use for I/O in the backing store
     off_t offset;
     double heat;
     size_t size;
@@ -50,7 +70,7 @@ struct EvictionCandidate
     struct ByHeat
     {
     };
-    struct ByPathAndOffset
+    struct ByFileIdAndOffset
     {
     };
 };
@@ -62,5 +82,20 @@ struct FileCacheState
 };
 
 }  // namespace DistributedCacheFS::Cache
+
+namespace std
+{
+template <>
+struct hash<DistributedCacheFS::Cache::FileId>
+{
+    size_t operator()(const DistributedCacheFS::Cache::FileId& id) const noexcept
+    {
+        size_t seed = 0;
+        seed ^= std::hash<dev_t>{}(id.st_dev) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        seed ^= std::hash<ino_t>{}(id.st_ino) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+        return seed;
+    }
+};
+}  // namespace std
 
 #endif  // DISTRIBUTEDCACHEFS_SRC_CACHE_BLOCK_METADATA_HPP_

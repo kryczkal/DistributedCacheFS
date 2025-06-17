@@ -45,22 +45,29 @@ class CacheTier
     CacheStats& GetStats() { return stats_; }
 
     StorageResult<std::pair<RegionList, RegionList>> GetCachedRegions(
-        const fs::path& fuse_path, off_t offset, size_t size, const CoherencyMetadata& origin_metadata
+        const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
+        const CoherencyMetadata& origin_metadata
     );
 
     StorageResult<void> CacheRegion(
-        const fs::path& fuse_path, off_t offset, std::span<std::byte> data,
-        const CoherencyMetadata& coherency_metadata, double base_fetch_cost_ms
+        const FileId& file_id, const fs::path& access_path, off_t offset,
+        std::span<std::byte> data, const CoherencyMetadata& coherency_metadata,
+        double base_fetch_cost_ms
     );
 
     StorageResult<bool> IsRegionWorthInserting(double new_region_heat, size_t new_region_size);
-
     StorageResult<void> FreeUpSpace(size_t required_space);
 
-    StorageResult<void> InvalidateAndRemoveItem(const fs::path& fuse_path);
-    StorageResult<void> InvalidateRegion(const fs::path& fuse_path, off_t offset, size_t size);
+    StorageResult<void> InvalidateAndPurgeItem(const FileId& file_id);
+    StorageResult<void> InvalidateRegion(
+        const FileId& file_id, const fs::path& access_path, off_t offset, size_t size
+    );
 
-    StorageResult<ItemMetadata> GetItemMetadata(const fs::path& fuse_path);
+    StorageResult<ItemMetadata> GetItemMetadata(const FileId& file_id);
+
+    void AddLink(const FileId& file_id, const fs::path& new_path);
+    bool RemoveLink(const FileId& file_id, const fs::path& path_to_remove);
+    void RenameLink(const FileId& file_id, const fs::path& from, const fs::path& to);
 
     double CalculateInitialRegionHeat(double fetch_cost_ms, size_t region_size) const;
     double CalculateRegionHeat(

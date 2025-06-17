@@ -43,9 +43,7 @@ StorageResult<void> CacheManager::InitializeAll()
         return std::unexpected(res.error());
     }
 
-    std::unique_lock lock_states(file_states_mutex_);
     tier_to_cache_.clear();
-    file_states_.clear();
 
     for (const auto& cache_definition : config_.cache_definitions) {
         auto cache_instance = std::make_shared<CacheTier>(cache_definition);
@@ -60,7 +58,6 @@ StorageResult<void> CacheManager::InitializeAll()
 StorageResult<void> CacheManager::ShutdownAll()
 {
     io_manager_.reset();
-    std::unique_lock lock_states(file_states_mutex_);
     std::error_code first_error;
 
     for (auto& [tier, cache_tiers] : tier_to_cache_) {
@@ -74,10 +71,12 @@ StorageResult<void> CacheManager::ShutdownAll()
     }
 
     if (auto res = origin_->Shutdown(); !res) {
-        if (!first_error) first_error = res.error();
+        if (!first_error)
+            first_error = res.error();
     }
 
-    if (first_error) return std::unexpected(first_error);
+    if (first_error)
+        return std::unexpected(first_error);
     return {};
 }
 
@@ -103,32 +102,40 @@ StorageResult<size_t> CacheManager::ReadFile(
     std::lock_guard file_lock(*file_mutex);
 
     auto origin_meta_res = GetOriginCoherencyMetadata(fuse_path);
-    if (!origin_meta_res) return std::unexpected(origin_meta_res.error());
+    if (!origin_meta_res)
+        return std::unexpected(origin_meta_res.error());
     CoherencyMetadata origin_meta = origin_meta_res.value();
+    auto attr_res = origin_->GetAttributes(fuse_path);
+    if (!attr_res)
+        return std::unexpected(attr_res.error());
+    FileId file_id{attr_res->st_dev, attr_res->st_ino};
 
-    if (offset >= origin_meta.size_bytes) return 0;
+    if (offset >= origin_meta.size_bytes)
+        return 0;
     size_t size_to_read = std::min(buffer.size(), (size_t)(origin_meta.size_bytes - offset));
-    if (size_to_read == 0) return 0;
+    if (size_to_read == 0)
+        return 0;
 
     RegionList missing_regions = {{offset, size_to_read}};
     size_t bytes_from_cache    = 0;
-    std::vector<std::shared_ptr<CacheTier>> resident_tiers;
 
-    {
-        std::shared_lock lock(file_states_mutex_);
-        auto it = file_states_.find(fuse_path);
-        if (it != file_states_.end()) {
-            resident_tiers.assign(it->second.resident_tiers.begin(), it->second.resident_tiers.end());
+    std::vector<std::shared_ptr<CacheTier>> tiers_with_data;
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+        for (const auto& tier : it->second) {
+            if (tier->GetItemMetadata(file_id)) {
+                tiers_with_data.push_back(tier);
+            }
         }
     }
 
-    // Iterate through tiers, refining the missing_regions list
-    for (const auto& tier : resident_tiers) {
-        if (missing_regions.empty()) break;
+    for (const auto& tier : tiers_with_data) {
+        if (missing_regions.empty())
+            break;
         RegionList current_tier_missing;
         for (const auto& missing_region : missing_regions) {
-            auto regions_res =
-                tier->GetCachedRegions(fuse_path, missing_region.first, missing_region.second, origin_meta);
+            auto regions_res = tier->GetCachedRegions(
+                file_id, fuse_path, missing_region.first, missing_region.second, origin_meta
+            );
             if (regions_res) {
                 auto& [cached, missing] = *regions_res;
                 if (!cached.empty()) {
@@ -138,8 +145,9 @@ StorageResult<size_t> CacheManager::ReadFile(
                     off_t buffer_start_at        = r.first - offset;
                     std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, r.second};
                     auto read_res = tier->GetStorage()->Read(fuse_path, r.first, sub_buffer);
-                    if (read_res) bytes_from_cache += *read_res;
-                    TryPromoteBlock(fuse_path, r.first, r.second, tier);
+                    if (read_res)
+                        bytes_from_cache += *read_res;
+                    TryPromoteBlock(file_id, fuse_path, r.first, r.second, tier);
                 }
                 current_tier_missing.insert(current_tier_missing.end(), missing.begin(), missing.end());
             } else {
@@ -182,12 +190,17 @@ StorageResult<size_t> CacheManager::ReadFile(
                     std::vector<std::byte> data_to_cache(bytes_actually_read);
                     std::copy_n(buffer.data() + buffer_start_at, bytes_actually_read, data_to_cache.begin());
 
-                    io_manager_->SubmitTask(
-                        [this, fuse_path, region_offset, data_to_cache = std::move(data_to_cache), fetch_cost_ms](
-                        ) mutable {
-                            this->CacheRegionAsync(fuse_path, region_offset, std::move(data_to_cache), fetch_cost_ms);
-                        }
-                    );
+                    io_manager_->SubmitTask([this,
+                                             file_id,
+                                             fuse_path,
+                                             region_offset,
+                                             data_to_cache = std::move(data_to_cache),
+                                             fetch_cost_ms]() mutable {
+                        this->CacheRegionAsync(
+                            file_id, fuse_path, region_offset, std::move(data_to_cache),
+                            fetch_cost_ms
+                        );
+                    });
                 }
             } else {
                 return std::unexpected(res.error());
@@ -205,78 +218,168 @@ StorageResult<size_t> CacheManager::WriteFile(
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
 
-    auto res = origin_->Write(fuse_path, offset, data);
-    if (!res) return std::unexpected(res.error());
+    auto attr_res_before = origin_->GetAttributes(fuse_path);
+    auto res             = origin_->Write(fuse_path, offset, data);
+    if (!res)
+        return std::unexpected(res.error());
 
-    std::vector<std::shared_ptr<CacheTier>> resident_tiers;
-    {
-        std::shared_lock lock(file_states_mutex_);
-        auto it = file_states_.find(fuse_path);
-        if (it != file_states_.end()) {
-            resident_tiers.assign(it->second.resident_tiers.begin(), it->second.resident_tiers.end());
+    if (attr_res_before) {
+        FileId file_id{attr_res_before->st_dev, attr_res_before->st_ino};
+        for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+            for (const auto& tier : it->second) {
+                if (tier->GetItemMetadata(file_id)) {
+                    tier->InvalidateRegion(file_id, fuse_path, offset, data.size());
+                }
+            }
         }
-    }
-    for (const auto& tier : resident_tiers) {
-        tier->InvalidateRegion(fuse_path, offset, data.size());
     }
 
     return res.value();
 }
 
-void CacheManager::InvalidateCache(const fs::path& fuse_path)
+void CacheManager::InvalidateAndPurgeByPath(const fs::path& fuse_path)
 {
-    std::unique_lock lock(file_states_mutex_);
-    auto it = file_states_.find(fuse_path);
-    if (it == file_states_.end()) return;
-
-    for (const auto& tier : it->second.resident_tiers) {
-        tier->InvalidateAndRemoveItem(fuse_path);
+    auto attr_res = origin_->GetAttributes(fuse_path);
+    if (!attr_res) {
+        return; // File doesn't exist, nothing to do.
     }
-    file_states_.erase(it);
+    FileId file_id{attr_res->st_dev, attr_res->st_ino};
+
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+        for (const auto& tier : it->second) {
+            tier->InvalidateAndPurgeItem(file_id);
+        }
+    }
 }
 
 StorageResult<void> CacheManager::Remove(std::filesystem::path& fuse_path)
 {
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
+
+    auto attr_res_before = origin_->GetAttributes(fuse_path);
+    if (!attr_res_before) {
+        return {}; // Already gone
+    }
+    FileId file_id{attr_res_before->st_dev, attr_res_before->st_ino};
+
     auto res = origin_->Remove(fuse_path);
-    if (res) InvalidateCache(fuse_path);
-    return res;
+    if (!res) {
+        return res;
+    }
+
+    auto attr_res_after = origin_->GetAttributes(fuse_path);
+    bool is_last_link   = !attr_res_after.has_value() ||
+                        (attr_res_after->st_ino != file_id.st_ino);
+
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+        for (const auto& tier : it->second) {
+            if (is_last_link) {
+                tier->InvalidateAndPurgeItem(file_id);
+            } else {
+                tier->RemoveLink(file_id, fuse_path);
+            }
+        }
+    }
+
+    return {};
 }
 
 StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path, off_t size)
 {
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
+
+    auto attr_res = origin_->GetAttributes(fuse_path);
+    if (!attr_res) {
+        return origin_->Truncate(fuse_path, size);
+    }
+    FileId file_id{attr_res->st_dev, attr_res->st_ino};
+    off_t old_size = attr_res->st_size;
+
     auto res = origin_->Truncate(fuse_path, size);
-    if (res) InvalidateCache(fuse_path);  // Simple invalidation, can be optimized
-    return res;
+    if (!res) {
+        return res;
+    }
+
+    if (size < old_size) {
+        off_t invalid_offset = size;
+        size_t invalid_size  = old_size - size;
+        for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+            for (const auto& tier : it->second) {
+                if (tier->GetItemMetadata(file_id)) {
+                    tier->InvalidateRegion(file_id, fuse_path, invalid_offset, invalid_size);
+                }
+            }
+        }
+    }
+
+    return {};
 }
 
 StorageResult<void> CacheManager::Move(
     std::filesystem::path& from_fuse_path, std::filesystem::path& to_fuse_path
 )
 {
-    // Acquire locks in a globally consistent order to prevent deadlock.
     auto mutex1 = file_lock_manager_->GetFileLock(std::min(from_fuse_path, to_fuse_path));
     auto mutex2 = file_lock_manager_->GetFileLock(std::max(from_fuse_path, to_fuse_path));
     std::scoped_lock file_locks(*mutex1, *mutex2);
 
+    auto attr_res = origin_->GetAttributes(from_fuse_path);
+    if (!attr_res) {
+        // Renaming something that doesn't exist, let origin handle it.
+        return origin_->Move(from_fuse_path, to_fuse_path);
+    }
+    FileId file_id{attr_res->st_dev, attr_res->st_ino};
+
+    InvalidateAndPurgeByPath(to_fuse_path); // Invalidate destination if it exists
+
     auto res = origin_->Move(from_fuse_path, to_fuse_path);
     if (res) {
-        InvalidateCache(from_fuse_path);
-        InvalidateCache(to_fuse_path);
+        for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+            for (const auto& tier : it->second) {
+                if (tier->GetItemMetadata(file_id)) {
+                    tier->RenameLink(file_id, from_fuse_path, to_fuse_path);
+                }
+            }
+        }
     }
     return res;
+}
+
+StorageResult<void> CacheManager::CreateHardLink(const fs::path& from_path, const fs::path& to_path)
+{
+    auto mutex1 = file_lock_manager_->GetFileLock(std::min(from_path, to_path));
+    auto mutex2 = file_lock_manager_->GetFileLock(std::max(from_path, to_path));
+    std::scoped_lock file_locks(*mutex1, *mutex2);
+
+    auto attr_res = origin_->GetAttributes(from_path);
+    if (!attr_res) {
+        return std::unexpected(attr_res.error());
+    }
+    FileId file_id{attr_res->st_dev, attr_res->st_ino};
+
+    InvalidateAndPurgeByPath(to_path); // Invalidate destination if it exists
+
+    auto link_res = origin_->CreateHardLink(from_path, to_path);
+    if (link_res) {
+        for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+            for (const auto& tier : it->second) {
+                if (tier->GetItemMetadata(file_id)) {
+                    tier->AddLink(file_id, to_path);
+                }
+            }
+        }
+    }
+    return link_res;
 }
 
 StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, mode_t mode)
 {
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
-    auto res = origin_->CreateFile(fuse_path, mode);
-    if (res) InvalidateCache(fuse_path);
-    return res;
+    InvalidateAndPurgeByPath(fuse_path);
+    return origin_->CreateFile(fuse_path, mode);
 }
 
 StorageResult<void> CacheManager::CreateSpecialFile(
@@ -331,11 +434,12 @@ StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_pa
 }
 
 void CacheManager::CacheRegionAsync(
-    const fs::path& fuse_path, off_t offset, std::vector<std::byte> region_data,
+    const FileId& file_id, const fs::path& fuse_path, off_t offset, std::vector<std::byte> region_data,
     double fetch_cost_ms
 )
 {
-    if (region_data.empty()) return;
+    if (region_data.empty())
+        return;
 
     size_t size = region_data.size();
     std::span<std::byte> region_span{region_data};
@@ -346,8 +450,7 @@ void CacheManager::CacheRegionAsync(
         return;
     }
 
-    std::shared_ptr<CacheTier>
-        best_tier = nullptr;  // Find a tier to calculate heat
+    std::shared_ptr<CacheTier> best_tier = nullptr;
     if (!tier_to_cache_.empty()) {
         auto top_tier_level = tier_to_cache_.rbegin()->first;
         if (!tier_to_cache_.at(top_tier_level).empty()) {
@@ -378,12 +481,9 @@ void CacheManager::CacheRegionAsync(
     }
     auto tier = tier_res.value();
 
-    auto cache_res = tier->CacheRegion(fuse_path, offset, region_span, *origin_meta_res, fetch_cost_ms);
-    if (cache_res) {
-        std::unique_lock lock(file_states_mutex_);
-        file_states_[fuse_path].resident_tiers.insert(tier);
-        file_states_[fuse_path].coherency_metadata = *origin_meta_res;
-    } else {
+    auto cache_res =
+        tier->CacheRegion(file_id, fuse_path, offset, region_span, *origin_meta_res, fetch_cost_ms);
+    if (!cache_res) {
         spdlog::warn(
             "CacheRegionAsync for {} failed: tier->CacheRegion returned an error: {}", fuse_path.string(),
             cache_res.error().message()
@@ -391,8 +491,10 @@ void CacheManager::CacheRegionAsync(
     }
 }
 
+
 void CacheManager::TryPromoteBlock(
-    const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier
+    const FileId& file_id, const fs::path& fuse_path, off_t offset, size_t size,
+    std::shared_ptr<CacheTier> source_tier
 )
 {
     auto source_tier_level = source_tier->GetTier();
@@ -413,7 +515,7 @@ void CacheManager::TryPromoteBlock(
 
     destination_tier->GetStats().IncrementPromotions();
 
-    io_manager_->SubmitTask([this, fuse_path, offset, size, source_tier, destination_tier]() mutable {
+    io_manager_->SubmitTask([this, file_id, fuse_path, offset, size, source_tier, destination_tier]() mutable {
         std::vector<std::byte> data_buffer(size);
         std::span<std::byte> buffer_span{data_buffer};
 
@@ -437,14 +539,11 @@ void CacheManager::TryPromoteBlock(
 
         const double base_fetch_cost_ms = 1.0;
         auto cache_res = destination_tier->CacheRegion(
-            fuse_path, offset, buffer_span, *origin_meta_res, base_fetch_cost_ms
+            file_id, fuse_path, offset, buffer_span, *origin_meta_res, base_fetch_cost_ms
         );
 
         if (cache_res) {
-            std::unique_lock lock(file_states_mutex_);
-            file_states_[fuse_path].resident_tiers.insert(destination_tier);
-            // Invalidate the block in the lower tier to free space
-            source_tier->InvalidateRegion(fuse_path, offset, size);
+            source_tier->InvalidateRegion(file_id, fuse_path, offset, size);
         } else {
             spdlog::warn(
                 "Promotion of block for {} failed during write to destination tier {}: {}",
@@ -514,9 +613,12 @@ StorageResult<void> CacheManager::CheckPermissions(
     }
 
     mode_t need = 0;
-    if (access_mask & R_OK) need |= S_IRUSR;
-    if (access_mask & W_OK) need |= S_IWUSR;
-    if (access_mask & X_OK) need |= S_IXUSR;
+    if (access_mask & R_OK)
+        need |= S_IRUSR;
+    if (access_mask & W_OK)
+        need |= S_IWUSR;
+    if (access_mask & X_OK)
+        need |= S_IXUSR;
 
     if (avail == (file_mode & S_IRWXG)) {
         need >>= 3;

@@ -62,6 +62,11 @@ class LocalStorage : public IStorage
 
     StorageResult<void> CreateDirectory(const std::filesystem::path& relative_path, mode_t mode)
         override;
+    
+    StorageResult<void> CreateHardLink(
+        const std::filesystem::path& from_relative_path,
+        const std::filesystem::path& to_relative_path
+    ) override;
 
     StorageResult<void> Move(
         const std::filesystem::path& from_relative_path,

@@ -16,9 +16,10 @@ BlockManager::BlockManager()
 }
 
 std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
-    const fs::path& fuse_path, off_t offset, size_t size, const CoherencyMetadata& origin_metadata,
+    const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
+    const CoherencyMetadata& origin_metadata,
     std::function<double(const BlockMetadata&, double)> heat_updater,
-    std::function<void(const fs::path&)> on_stale_item
+    std::function<void(const FileId&)> on_stale_item
 )
 {
     std::unique_lock lock(metadata_mutex_);
@@ -26,8 +27,8 @@ std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
     RegionList cached_regions;
     RegionList missing_regions;
 
-    auto& item_index = item_metadatas_.get<by_path>();
-    auto item_it     = item_index.find(fuse_path);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
 
     if (item_it == item_index.end()) {
         missing_regions.push_back({offset, size});
@@ -36,7 +37,7 @@ std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
 
     if (item_it->coherency_metadata.last_modified_time != origin_metadata.last_modified_time ||
         item_it->coherency_metadata.size_bytes != origin_metadata.size_bytes) {
-        on_stale_item(fuse_path);
+        on_stale_item(file_id);
         missing_regions.push_back({offset, size});
         return {cached_regions, missing_regions};
     }
@@ -74,8 +75,8 @@ std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
         if (overlap_start < overlap_end) {
             cached_regions.push_back({overlap_start, (size_t)(overlap_end - overlap_start)});
 
-            auto& heat_index         = eviction_queue_.get<EvictionCandidate::ByPathAndOffset>();
-            auto eviction_it         = heat_index.find(std::make_tuple(fuse_path, block_offset));
+            auto& heat_index         = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+            auto eviction_it         = heat_index.find(std::make_tuple(file_id, block_offset));
             const auto& current_block = it->second;
 
             if (eviction_it != heat_index.end()) {
@@ -100,29 +101,33 @@ std::pair<RegionList, RegionList> BlockManager::GetCachedRegionsAndUpdateHeat(
 }
 
 void BlockManager::CacheRegion(
-    const fs::path& fuse_path, off_t offset, size_t size, double initial_heat,
-    double base_fetch_cost_ms, const CoherencyMetadata& coherency_metadata
+    const FileId& file_id, const fs::path& access_path, off_t offset, size_t size,
+    double initial_heat, double base_fetch_cost_ms, const CoherencyMetadata& coherency_metadata
 )
 {
     std::unique_lock lock(metadata_mutex_);
 
-    auto& item_index = item_metadatas_.get<by_path>();
-    auto item_it     = item_index.find(fuse_path);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
 
     if (item_it == item_index.end()) {
         item_it =
             item_index
                 .emplace(ItemMetadata{
-                    fuse_path, coherency_metadata, {}, base_fetch_cost_ms
+                    file_id, {access_path}, coherency_metadata, {}, base_fetch_cost_ms
                 })
                 .first;
     } else {
+        item_index.modify(
+            item_it, [&](ItemMetadata& item) { item.known_paths.insert(access_path); }
+        );
+
         if (item_it->coherency_metadata.last_modified_time != coherency_metadata.last_modified_time ||
             item_it->coherency_metadata.size_bytes != coherency_metadata.size_bytes) {
             item_index.modify(item_it, [&](ItemMetadata& item) {
                 item.blocks.clear();
                 item.coherency_metadata = coherency_metadata;
-                eviction_queue_.get<EvictionCandidate::ByPathAndOffset>().erase(fuse_path);
+                eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>().erase(file_id);
             });
         }
     }
@@ -132,34 +137,37 @@ void BlockManager::CacheRegion(
         item_it, [&](ItemMetadata& item) { item.blocks[offset] = new_block; }
     );
 
-    auto& heat_index  = eviction_queue_.get<EvictionCandidate::ByPathAndOffset>();
-    auto eviction_it = heat_index.find(std::make_tuple(fuse_path, offset));
+    auto& heat_index  = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto eviction_it = heat_index.find(std::make_tuple(file_id, offset));
     if (eviction_it != heat_index.end()) {
         heat_index.modify(eviction_it, [&](EvictionCandidate& c) {
-            c.heat = initial_heat;
-            c.size = size;
+            c.heat             = initial_heat;
+            c.size             = size;
+            c.path_for_storage = access_path;
         });
     } else {
-        eviction_queue_.emplace(EvictionCandidate{fuse_path, offset, initial_heat, size});
+        eviction_queue_.emplace(EvictionCandidate{
+            file_id, access_path, offset, initial_heat, size
+        });
     }
 }
 
 std::vector<BlockMetadata> BlockManager::InvalidateRegion(
-    const fs::path& fuse_path, off_t offset, size_t size
+    const FileId& file_id, off_t offset, size_t size
 )
 {
     std::unique_lock lock(metadata_mutex_);
     std::vector<BlockMetadata> invalidated_blocks;
 
-    auto& item_index = item_metadatas_.get<by_path>();
-    auto item_it     = item_index.find(fuse_path);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
     if (item_it == item_index.end()) {
         return invalidated_blocks;
     }
 
     off_t invalidation_end = offset + size;
     auto& blocks           = item_it->blocks;
-    auto& heat_index       = eviction_queue_.get<EvictionCandidate::ByPathAndOffset>();
+    auto& heat_index       = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
 
     for (auto it = blocks.begin(); it != blocks.end();) {
         off_t block_start = it->first;
@@ -167,7 +175,7 @@ std::vector<BlockMetadata> BlockManager::InvalidateRegion(
 
         if (block_start < invalidation_end && block_end > offset) {
             invalidated_blocks.push_back(it->second);
-            heat_index.erase(std::make_tuple(fuse_path, it->first));
+            heat_index.erase(std::make_tuple(file_id, it->first));
             it = blocks.erase(it);
         } else {
             ++it;
@@ -176,21 +184,34 @@ std::vector<BlockMetadata> BlockManager::InvalidateRegion(
     return invalidated_blocks;
 }
 
-void BlockManager::InvalidateAndRemoveItem(const fs::path& fuse_path)
+std::vector<BlockMetadata> BlockManager::InvalidateAndRemoveItem(const FileId& file_id)
 {
     std::unique_lock lock(metadata_mutex_);
-    auto& item_index = item_metadatas_.get<by_path>();
-    item_index.erase(fuse_path);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
+    if (item_it == item_index.end()) {
+        return {};
+    }
 
-    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByPathAndOffset>();
-    heat_index.erase(fuse_path);
+    std::vector<BlockMetadata> invalidated_blocks;
+    invalidated_blocks.reserve(item_it->blocks.size());
+    for (const auto& [offset, block] : item_it->blocks) {
+        invalidated_blocks.push_back(block);
+    }
+
+    item_index.erase(item_it);
+
+    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    heat_index.erase(file_id);
+
+    return invalidated_blocks;
 }
 
-std::optional<ItemMetadata> BlockManager::GetItemMetadata(const fs::path& fuse_path)
+std::optional<ItemMetadata> BlockManager::GetItemMetadata(const FileId& file_id)
 {
     std::shared_lock lock(metadata_mutex_);
-    auto& item_index = item_metadatas_.get<by_path>();
-    auto it          = item_index.find(fuse_path);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto it          = item_index.find(file_id);
     if (it != item_index.end()) {
         return *it;
     }
@@ -245,13 +266,13 @@ std::vector<EvictionCandidate> BlockManager::GetVictimsForEviction(size_t requir
 void BlockManager::RemoveEvictionVictims(const std::vector<EvictionCandidate>& victims)
 {
     std::unique_lock lock(metadata_mutex_);
-    auto& path_offset_index = eviction_queue_.get<EvictionCandidate::ByPathAndOffset>();
-    auto& item_index        = item_metadatas_.get<by_path>();
+    auto& path_offset_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto& item_index        = item_metadatas_.get<by_file_id>();
 
     for (const auto& victim : victims) {
-        path_offset_index.erase(std::make_tuple(victim.path, victim.offset));
+        path_offset_index.erase(std::make_tuple(victim.file_id, victim.offset));
 
-        auto item_it = item_index.find(victim.path);
+        auto item_it = item_index.find(victim.file_id);
         if (item_it != item_index.end()) {
             item_index.modify(item_it, [&](ItemMetadata& item) {
                 item.blocks.erase(victim.offset);
@@ -281,7 +302,7 @@ void BlockManager::RefreshRandomHeats(
     std::uniform_real_distribution<> dist(0.0, 1.0);
 
     auto& heat_idx   = eviction_queue_.get<EvictionCandidate::ByHeat>();
-    auto& item_index = item_metadatas_.get<by_path>();
+    auto& item_index = item_metadatas_.get<by_file_id>();
 
     std::vector<EvictionCandidate> to_update;
     for (const auto& candidate : heat_idx) {
@@ -291,7 +312,7 @@ void BlockManager::RefreshRandomHeats(
     }
 
     for (const auto& candidate : to_update) {
-        auto item_it = item_index.find(candidate.path);
+        auto item_it = item_index.find(candidate.file_id);
         if (item_it == item_index.end())
             continue;
         auto block_it = item_it->blocks.find(candidate.offset);
@@ -302,6 +323,53 @@ void BlockManager::RefreshRandomHeats(
         auto eviction_it = heat_idx.find(candidate);
         if (eviction_it != heat_idx.end()) {
             heat_idx.modify(eviction_it, [&](EvictionCandidate& c) { c.heat = new_heat; });
+        }
+    }
+}
+
+void BlockManager::AddLink(const FileId& file_id, const fs::path& new_path)
+{
+    std::unique_lock lock(metadata_mutex_);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
+    if (item_it != item_index.end()) {
+        item_index.modify(item_it, [&](ItemMetadata& item) { item.known_paths.insert(new_path); });
+    }
+}
+
+bool BlockManager::RemoveLink(const FileId& file_id, const fs::path& path_to_remove)
+{
+    std::unique_lock lock(metadata_mutex_);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
+    if (item_it != item_index.end()) {
+        bool was_empty = false;
+        item_index.modify(item_it, [&](ItemMetadata& item) {
+            item.known_paths.erase(path_to_remove);
+            was_empty = item.known_paths.empty();
+        });
+        return was_empty;
+    }
+    return true;  // Not tracked, so effectively has 0 links
+}
+
+void BlockManager::RenameLink(const FileId& file_id, const fs::path& from, const fs::path& to)
+{
+    std::unique_lock lock(metadata_mutex_);
+    auto& item_index = item_metadatas_.get<by_file_id>();
+    auto item_it     = item_index.find(file_id);
+    if (item_it != item_index.end()) {
+        item_index.modify(item_it, [&](ItemMetadata& item) {
+            item.known_paths.erase(from);
+            item.known_paths.insert(to);
+        });
+    }
+
+    auto& heat_index = eviction_queue_.get<EvictionCandidate::ByFileIdAndOffset>();
+    auto [range_begin, range_end] = heat_index.equal_range(file_id);
+    for (auto it = range_begin; it != range_end; ++it) {
+        if (it->path_for_storage == from) {
+            heat_index.modify(it, [&](EvictionCandidate& c) { c.path_for_storage = to; });
         }
     }
 }

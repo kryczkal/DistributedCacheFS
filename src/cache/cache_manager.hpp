@@ -38,8 +38,6 @@ class CacheManager
     template <typename T>
     using StorageResult = Storage::StorageResult<T>;
 
-    using FileStateMap = std::unordered_map<fs::path, FileCacheState>;
-
     public:
     explicit CacheManager(const Config::NodeConfig& config, std::shared_ptr<IStorage> origin);
     ~CacheManager();
@@ -67,29 +65,42 @@ class CacheManager
     );
 
     StorageResult<void> CreateFile(std::filesystem::path& fuse_path, mode_t mode);
+    StorageResult<void> CreateSpecialFile(std::filesystem::path& fuse_path, mode_t mode, dev_t rdev);
     StorageResult<void> CreateDirectory(std::filesystem::path& fuse_path, mode_t mode);
     StorageResult<void> Remove(std::filesystem::path& fuse_path);
     StorageResult<void> TruncateFile(std::filesystem::path& fuse_path, off_t size);
     StorageResult<void> Move(
         std::filesystem::path& from_fuse_path, std::filesystem::path& to_fuse_path
     );
+    StorageResult<void> CreateHardLink(const fs::path& from_path, const fs::path& to_path);
+
     StorageResult<struct statvfs> GetFilesystemStats(fs::path& fuse_path);
     StorageResult<void> SetPermissions(const fs::path& fuse_path, mode_t mode);
     StorageResult<void> SetOwner(const fs::path& fuse_path, uid_t uid, gid_t gid);
     StorageResult<void> CheckPermissions(
         const fs::path& fuse_path, int access_mask, uid_t caller_uid, gid_t caller_gid
     );
+    StorageResult<void> SetXattr(
+        const fs::path& fuse_path, const std::string& name, const char* value, size_t size,
+        int flags
+    );
+    StorageResult<ssize_t> GetXattr(
+        const fs::path& fuse_path, const std::string& name, char* value, size_t size
+    );
+    StorageResult<ssize_t> ListXattr(const fs::path& fuse_path, char* list, size_t size);
+    StorageResult<void> RemoveXattr(const fs::path& fuse_path, const std::string& name);
 
     private:
     void CacheRegionAsync(
-        const fs::path& fuse_path, off_t offset, std::vector<std::byte> region_data,
-        double fetch_cost_ms
+        const FileId& file_id, const fs::path& fuse_path, off_t offset,
+        std::vector<std::byte> region_data, double fetch_cost_ms
     );
 
-    void InvalidateCache(const fs::path& fuse_path);
+    void InvalidateAndPurgeByPath(const fs::path& fuse_path);
 
     void TryPromoteBlock(
-        const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier
+        const FileId& file_id, const fs::path& fuse_path, off_t offset, size_t size,
+        std::shared_ptr<CacheTier> source_tier
     );
 
     StorageResult<CoherencyMetadata> GetOriginCoherencyMetadata(const fs::path& fuse_path) const;
@@ -101,11 +112,8 @@ class CacheManager
     std::unique_ptr<ITierSelector> tier_selector_;
 
     TierToCacheMap tier_to_cache_;
-    FileStateMap file_states_;
-    mutable std::shared_mutex file_states_mutex_;
 };
 
 }  // namespace DistributedCacheFS::Cache
 
 #endif  // DISTRIBUTEDCACHEFS_SRC_CACHE_CACHE_MANAGER_HPP_
-
