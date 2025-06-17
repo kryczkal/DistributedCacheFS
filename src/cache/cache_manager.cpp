@@ -131,11 +131,15 @@ StorageResult<size_t> CacheManager::ReadFile(
                 tier->GetCachedRegions(fuse_path, missing_region.first, missing_region.second, origin_meta);
             if (regions_res) {
                 auto& [cached, missing] = *regions_res;
+                if (!cached.empty()) {
+                    tier->GetStats().IncrementHits();
+                }
                 for (const auto& r : cached) {
                     off_t buffer_start_at        = r.first - offset;
                     std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, r.second};
                     auto read_res = tier->GetStorage()->Read(fuse_path, r.first, sub_buffer);
                     if (read_res) bytes_from_cache += *read_res;
+                    TryPromoteBlock(fuse_path, r.first, r.second, tier);
                 }
                 current_tier_missing.insert(current_tier_missing.end(), missing.begin(), missing.end());
             } else {
@@ -147,6 +151,10 @@ StorageResult<size_t> CacheManager::ReadFile(
 
     size_t bytes_from_origin = 0;
     if (!missing_regions.empty()) {
+        if (!tier_to_cache_.empty() && !tier_to_cache_.rbegin()->second.empty()) {
+            tier_to_cache_.rbegin()->second.front()->GetStats().IncrementMisses();
+        }
+
         std::vector<std::future<StorageResult<size_t>>> futures;
         for (const auto& region : missing_regions) {
             off_t buffer_start_at        = region.first - offset;
@@ -271,6 +279,13 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
     return res;
 }
 
+StorageResult<void> CacheManager::CreateSpecialFile(
+    std::filesystem::path& fuse_path, mode_t mode, dev_t rdev
+)
+{
+    return origin_->CreateSpecialFile(fuse_path, mode, rdev);
+}
+
 StorageResult<void> CacheManager::CreateDirectory(std::filesystem::path& fuse_path, mode_t mode)
 {
     return origin_->CreateDirectory(fuse_path, mode);
@@ -284,6 +299,30 @@ StorageResult<void> CacheManager::SetPermissions(const fs::path& fuse_path, mode
 StorageResult<void> CacheManager::SetOwner(const fs::path& fuse_path, uid_t uid, gid_t gid)
 {
     return origin_->SetOwner(fuse_path, uid, gid);
+}
+
+StorageResult<void> CacheManager::SetXattr(
+    const fs::path& fuse_path, const std::string& name, const char* value, size_t size, int flags
+)
+{
+    return origin_->SetXattr(fuse_path, name, value, size, flags);
+}
+
+StorageResult<ssize_t> CacheManager::GetXattr(
+    const fs::path& fuse_path, const std::string& name, char* value, size_t size
+)
+{
+    return origin_->GetXattr(fuse_path, name, value, size);
+}
+
+StorageResult<ssize_t> CacheManager::ListXattr(const fs::path& fuse_path, char* list, size_t size)
+{
+    return origin_->ListXattr(fuse_path, list, size);
+}
+
+StorageResult<void> CacheManager::RemoveXattr(const fs::path& fuse_path, const std::string& name)
+{
+    return origin_->RemoveXattr(fuse_path, name);
 }
 
 StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_path)
@@ -356,9 +395,63 @@ void CacheManager::TryPromoteBlock(
     const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier
 )
 {
-    // Implementation for promoting a block to a higher tier would go here.
-    // It would involve reading from source_tier, writing to a faster tier,
-    // updating file_states_, and punching a hole in the source_tier storage.
+    auto source_tier_level = source_tier->GetTier();
+
+    std::shared_ptr<CacheTier> destination_tier = nullptr;
+    for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
+        if (it->first > source_tier_level) {
+            if (!it->second.empty()) {
+                destination_tier = it->second.front();
+                break;
+            }
+        }
+    }
+
+    if (!destination_tier) {
+        return;
+    }
+
+    destination_tier->GetStats().IncrementPromotions();
+
+    io_manager_->SubmitTask([this, fuse_path, offset, size, source_tier, destination_tier]() mutable {
+        std::vector<std::byte> data_buffer(size);
+        std::span<std::byte> buffer_span{data_buffer};
+
+        auto read_res = source_tier->GetStorage()->Read(fuse_path, offset, buffer_span);
+        if (!read_res) {
+            spdlog::warn(
+                "Promotion of block for {} failed during read from source tier {}: {}",
+                fuse_path.string(), source_tier->GetTier(), read_res.error().message()
+            );
+            return;
+        }
+
+        auto origin_meta_res = GetOriginCoherencyMetadata(fuse_path);
+        if (!origin_meta_res) {
+            spdlog::warn(
+                "Promotion of block for {} failed getting origin metadata: {}", fuse_path.string(),
+                origin_meta_res.error().message()
+            );
+            return;
+        }
+
+        const double base_fetch_cost_ms = 1.0;
+        auto cache_res = destination_tier->CacheRegion(
+            fuse_path, offset, buffer_span, *origin_meta_res, base_fetch_cost_ms
+        );
+
+        if (cache_res) {
+            std::unique_lock lock(file_states_mutex_);
+            file_states_[fuse_path].resident_tiers.insert(destination_tier);
+            // Invalidate the block in the lower tier to free space
+            source_tier->InvalidateRegion(fuse_path, offset, size);
+        } else {
+            spdlog::warn(
+                "Promotion of block for {} failed during write to destination tier {}: {}",
+                fuse_path.string(), destination_tier->GetTier(), cache_res.error().message()
+            );
+        }
+    });
 }
 
 StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(

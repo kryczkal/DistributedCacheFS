@@ -123,21 +123,21 @@ int readlink(const char *path, char *linkbuf, size_t size)
     return -ENOSYS;
 }
 
-int mknod(const char *path, mode_t mode, dev_t /*rdev*/)
+int mknod(const char *path, mode_t mode, dev_t rdev)
 {
     spdlog::trace("FUSE mknod called for path: {}, mode={:o}", path, mode);
     Cache::CacheManager *manager = FuseOps::get_coordinator();
     if (!manager)
         return -EIO;
 
-    if (!S_ISREG(mode)) {
-        spdlog::warn("FUSE mknod: unsupported file type {:o}", mode);
-        return -EPERM;  // Operation not permitted for non-regular files
-    }
-
     auto fuse_path = FuseOps::get_fuse_path(path);
-    auto result    = manager->CreateFile(fuse_path, mode);
-    return Storage::StorageResultToErrno(result);
+    if (S_ISREG(mode)) {
+        auto result = manager->CreateFile(fuse_path, mode);
+        return Storage::StorageResultToErrno(result);
+    } else {
+        auto result = manager->CreateSpecialFile(fuse_path, mode, rdev);
+        return Storage::StorageResultToErrno(result);
+    }
 }
 
 int mkdir(const char *path, mode_t mode)
@@ -403,11 +403,55 @@ int fsync(const char *path, int isdatasync, struct fuse_file_info * /*fi*/)
     return 0;
 }
 
-// xattr operations - TODO: Not Implemented
-int setxattr(const char *, const char *, const char *, size_t, int) { return -ENOSYS; }
-int getxattr(const char *, const char *, char *, size_t) { return -ENOSYS; }
-int listxattr(const char *, char *, size_t) { return -ENOSYS; }
-int removexattr(const char *, const char *) { return -ENOSYS; }
+int setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
+{
+    spdlog::trace("FUSE setxattr called for path: {}", path);
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = manager->SetXattr(fuse_path, name, value, size, flags);
+    return Storage::StorageResultToErrno(result);
+}
+
+int getxattr(const char *path, const char *name, char *value, size_t size)
+{
+    spdlog::trace("FUSE getxattr called for path: {}", path);
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = manager->GetXattr(fuse_path, name, value, size);
+    if (!result) {
+        return Storage::StorageResultToErrno(result);
+    }
+    return static_cast<int>(result.value());
+}
+
+int listxattr(const char *path, char *list, size_t size)
+{
+    spdlog::trace("FUSE listxattr called for path: {}", path);
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = manager->ListXattr(fuse_path, list, size);
+    if (!result) {
+        return Storage::StorageResultToErrno(result);
+    }
+    return static_cast<int>(result.value());
+}
+
+int removexattr(const char *path, const char *name)
+{
+    spdlog::trace("FUSE removexattr called for path: {}", path);
+    Cache::CacheManager *manager = FuseOps::get_coordinator();
+    if (!manager)
+        return -EIO;
+    auto fuse_path = FuseOps::get_fuse_path(path);
+    auto result    = manager->RemoveXattr(fuse_path, name);
+    return Storage::StorageResultToErrno(result);
+}
 
 // opendir/releasedir - Minimal Implementation
 int opendir(const char *path, struct fuse_file_info *fi)

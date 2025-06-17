@@ -62,9 +62,19 @@ StorageResult<std::pair<RegionList, RegionList>> CacheTier::GetCachedRegions(
 
     auto on_stale_item = [this](const fs::path& p) { this->InvalidateAndRemoveItem(p); };
 
-    return block_manager_->GetCachedRegionsAndUpdateHeat(
+    auto result = block_manager_->GetCachedRegionsAndUpdateHeat(
         fuse_path, offset, size, origin_metadata, heat_updater, on_stale_item
     );
+
+    if (result && !result->first.empty()) {
+        size_t prev_hits = read_hit_counter_.fetch_add(1, std::memory_order_relaxed);
+        if (prev_hits + 1 >= Constants::HEAT_REFRESH_PERIOD) {
+            read_hit_counter_.store(0, std::memory_order_relaxed);
+            block_manager_->RefreshRandomHeats(heat_updater);
+        }
+    }
+
+    return result;
 }
 
 StorageResult<void> CacheTier::CacheRegion(
@@ -111,7 +121,7 @@ StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
 
     auto victims = block_manager_->GetVictimsForEviction(space_to_free);
     if (victims.empty() && space_to_free > 0) {
-         return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
+        return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
     }
 
     size_t reclaimed = 0;
@@ -121,6 +131,8 @@ StorageResult<void> CacheTier::FreeUpSpace(size_t required_space)
     if (reclaimed < space_to_free) {
         return std::unexpected(make_error_code(StorageErrc::OutOfSpace));
     }
+
+    stats_.AddItemsEvicted(victims.size());
 
     for (const auto& victim : victims) {
         auto punch_res = storage_instance_->PunchHole(victim.path, victim.offset, victim.size);

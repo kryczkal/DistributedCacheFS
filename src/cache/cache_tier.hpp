@@ -6,6 +6,7 @@
 #include "config/config_types.hpp"
 #include "storage/i_storage.hpp"
 
+#include <atomic>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -41,6 +42,7 @@ class CacheTier
     size_t GetTier() const { return cache_definition_.tier; }
     Storage::IStorage* GetStorage() { return storage_instance_.get(); }
     const Config::CacheSettings& GetSettings() const { return cache_definition_.cache_settings; }
+    CacheStats& GetStats() { return stats_; }
 
     StorageResult<std::pair<RegionList, RegionList>> GetCachedRegions(
         const fs::path& fuse_path, off_t offset, size_t size, const CoherencyMetadata& origin_metadata
@@ -70,6 +72,7 @@ class CacheTier
     std::unique_ptr<Storage::IStorage> storage_instance_;
     std::unique_ptr<BlockManager> block_manager_;
     CacheStats stats_;
+    mutable std::atomic<size_t> read_hit_counter_{0};
 };
 
 }  // namespace DistributedCacheFS::Cache

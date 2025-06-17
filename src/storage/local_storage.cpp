@@ -21,9 +21,6 @@ namespace DistributedCacheFS::Storage
 
 namespace fs = std::filesystem;
 
-const char* LocalStorage::XATTR_ORIGIN_MTIME_KEY = "user.dcachefs.origin_mtime_sec";
-const char* LocalStorage::XATTR_ORIGIN_SIZE_KEY  = "user.dcachefs.size";
-
 namespace
 {
 
@@ -120,54 +117,7 @@ class FileDescriptorGuard
     explicit operator bool() const noexcept { return fd_ >= 0; }
 };
 
-}
-
-StorageResult<void> LocalStorage::SetXattr(
-    const std::filesystem::path& full_path, const char* key, const void* value, size_t size
-)
-{
-    if (::setxattr(full_path.c_str(), key, value, size, 0) == -1) {
-        int xattr_errno = errno;
-        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
-    }
-    return {};
-}
-
-StorageResult<std::vector<char>> LocalStorage::GetXattr(
-    const std::filesystem::path& full_path, const char* key
-) const
-{
-    ssize_t size = ::getxattr(full_path.c_str(), key, nullptr, 0);
-    if (size == -1) {
-        int xattr_errno = errno;
-        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
-    }
-    if (size == 0) {
-        return std::vector<char>();
-    }
-
-    std::vector<char> value(size);
-    size = ::getxattr(full_path.c_str(), key, value.data(), value.size());
-    if (size == -1) {
-        int xattr_errno = errno;
-        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
-    }
-    value.resize(size);
-    return value;
-}
-
-StorageResult<void> LocalStorage::RemoveXattr(
-    const std::filesystem::path& full_path, const char* key
-)
-{
-    if (::removexattr(full_path.c_str(), key) == -1) {
-        int xattr_errno = errno;
-        if (xattr_errno != ENODATA) {
-            return std::unexpected(make_error_code(XattrErrnoToStorageErrc(xattr_errno)));
-        }
-    }
-    return {};
-}
+}  // namespace
 
 std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::path& relative_path
 ) const
@@ -443,9 +393,6 @@ StorageResult<void> LocalStorage::Remove(const std::filesystem::path& relative_p
             size_to_remove = static_cast<uint64_t>(st.st_size);
     }
 
-    auto rem_mtime_res = RemoveXattr(full_path, XATTR_ORIGIN_MTIME_KEY);
-    auto rem_size_res = RemoveXattr(full_path, XATTR_ORIGIN_SIZE_KEY);
-
     std::string full_path_str = full_path.string();
     std::string base_path_str = base_path_.string();
     if (!full_path_str.empty() && full_path_str.back() == fs::path::preferred_separator)
@@ -584,6 +531,28 @@ StorageResult<void> LocalStorage::CreateFile(
     return {};
 }
 
+StorageResult<void> LocalStorage::CreateSpecialFile(
+    const std::filesystem::path& relative_path, mode_t mode, dev_t rdev
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty())
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+
+    std::error_code ec;
+    std::filesystem::create_directories(full_path.parent_path(), ec);
+    if (ec)
+        return std::unexpected(MapFilesystemError(ec, "create_special_file_parent"));
+
+    if (::mknod(full_path.c_str(), mode, rdev) == -1) {
+        return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
+    }
+
+    return {};
+}
+
 StorageResult<void> LocalStorage::CreateDirectory(
     const std::filesystem::path& relative_path, mode_t mode
 )
@@ -662,6 +631,76 @@ StorageResult<struct statvfs> LocalStorage::GetFilesystemStats(const std::string
         return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
     }
     return st;
+}
+
+StorageResult<void> LocalStorage::SetXattr(
+    const fs::path& relative_path, const std::string& name, const char* value, size_t size,
+    int flags
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    if (::setxattr(full_path.c_str(), name.c_str(), value, size, flags) == -1) {
+        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(errno)));
+    }
+    return {};
+}
+
+StorageResult<ssize_t> LocalStorage::GetXattr(
+    const fs::path& relative_path, const std::string& name, char* value, size_t size
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    ssize_t res = ::getxattr(full_path.c_str(), name.c_str(), value, size);
+    if (res == -1) {
+        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(errno)));
+    }
+    return res;
+}
+
+StorageResult<ssize_t> LocalStorage::ListXattr(
+    const fs::path& relative_path, char* list, size_t size
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    ssize_t res = ::listxattr(full_path.c_str(), list, size);
+    if (res == -1) {
+        return std::unexpected(make_error_code(XattrErrnoToStorageErrc(errno)));
+    }
+    return res;
+}
+
+StorageResult<void> LocalStorage::RemoveXattr(
+    const fs::path& relative_path, const std::string& name
+)
+{
+    std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
+    auto full_path = GetValidatedFullPath(relative_path);
+    if (full_path.empty()) {
+        return std::unexpected(make_error_code(StorageErrc::InvalidPath));
+    }
+
+    if (::removexattr(full_path.c_str(), name.c_str()) == -1) {
+        // ENODATA means the attribute didn't exist, which is not an error for a remove operation.
+        if (errno != ENODATA) {
+            return std::unexpected(make_error_code(XattrErrnoToStorageErrc(errno)));
+        }
+    }
+    return {};
 }
 
 LocalStorage::LocalStorage(const Config::StorageDefinition& definition)

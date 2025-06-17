@@ -108,3 +108,4 @@ class CacheManager
 }  // namespace DistributedCacheFS::Cache
 
 #endif  // DISTRIBUTEDCACHEFS_SRC_CACHE_CACHE_MANAGER_HPP_
+

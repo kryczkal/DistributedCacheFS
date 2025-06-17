@@ -7,6 +7,7 @@
 
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <system_error>
 
 namespace DistributedCacheFS::Storage
@@ -48,12 +49,16 @@ class LocalStorage : public IStorage
     ) const override;
     StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const override;
+    StorageResult<struct statvfs> GetFilesystemStats(const std::string& path) const override;
     StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
         const std::filesystem::path& relative_path
     ) override;
 
     StorageResult<void> CreateFile(const std::filesystem::path& relative_path, mode_t mode)
         override;
+    StorageResult<void> CreateSpecialFile(
+        const std::filesystem::path& relative_path, mode_t mode, dev_t rdev
+    ) override;
 
     StorageResult<void> CreateDirectory(const std::filesystem::path& relative_path, mode_t mode)
         override;
@@ -67,6 +72,20 @@ class LocalStorage : public IStorage
 
     StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) override;
 
+    StorageResult<void> SetXattr(
+        const fs::path& relative_path, const std::string& name, const char* value, size_t size,
+        int flags
+    ) override;
+    StorageResult<ssize_t> GetXattr(
+        const fs::path& relative_path, const std::string& name, char* value, size_t size
+    ) override;
+    StorageResult<ssize_t> ListXattr(
+        const fs::path& relative_path, char* list, size_t size
+    ) override;
+    StorageResult<void> RemoveXattr(
+        const fs::path& relative_path, const std::string& name
+    ) override;
+
     StorageResult<void> Initialize() override;
     StorageResult<void> Shutdown() override;
 
@@ -77,16 +96,6 @@ class LocalStorage : public IStorage
     std::filesystem::path GetValidatedFullPath(const std::filesystem::path& relative_path) const;
     std::error_code MapFilesystemError(const std::error_code& ec, const std::string& operation = "")
         const;
-    StorageResult<void> SetXattr(
-        const std::filesystem::path& full_path, const char* key, const void* value, size_t size
-    );
-    StorageResult<std::vector<char>> GetXattr(
-        const std::filesystem::path& full_path, const char* key
-    ) const;
-    StorageResult<void> RemoveXattr(const std::filesystem::path& full_path, const char* key);
-
-    static const char* XATTR_ORIGIN_MTIME_KEY;
-    static const char* XATTR_ORIGIN_SIZE_KEY;
 
     const Config::StorageDefinition definition_;
     fs::path base_path_;

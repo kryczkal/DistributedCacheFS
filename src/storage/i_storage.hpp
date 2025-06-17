@@ -59,12 +59,18 @@ class IStorage
     virtual StorageResult<struct stat> GetAttributes(const std::filesystem::path& relative_path
     ) const = 0;
 
+    virtual StorageResult<struct statvfs> GetFilesystemStats(const std::string& path) const = 0;
+
     virtual StorageResult<std::vector<std::pair<std::string, struct stat>>> ListDirectory(
         const std::filesystem::path& relative_path
     ) = 0;
 
     virtual StorageResult<void> CreateFile(
         const std::filesystem::path& relative_path, mode_t mode
+    ) = 0;
+
+    virtual StorageResult<void> CreateSpecialFile(
+        const std::filesystem::path& relative_path, mode_t mode, dev_t rdev
     ) = 0;
 
     virtual StorageResult<void> CreateDirectory(
@@ -78,6 +84,20 @@ class IStorage
     virtual StorageResult<void> SetPermissions(const fs::path& relative_path, mode_t mode) = 0;
 
     virtual StorageResult<void> SetOwner(const fs::path& relative_path, uid_t uid, gid_t gid) = 0;
+
+    virtual StorageResult<void> SetXattr(
+        const fs::path& relative_path, const std::string& name, const char* value, size_t size,
+        int flags
+    ) = 0;
+    virtual StorageResult<ssize_t> GetXattr(
+        const fs::path& relative_path, const std::string& name, char* value, size_t size
+    ) = 0;
+    virtual StorageResult<ssize_t> ListXattr(
+        const fs::path& relative_path, char* list, size_t size
+    ) = 0;
+    virtual StorageResult<void> RemoveXattr(
+        const fs::path& relative_path, const std::string& name
+    ) = 0;
 
     virtual StorageResult<void> Initialize() = 0;
     virtual StorageResult<void> Shutdown()   = 0;
