@@ -77,8 +77,9 @@ class CacheManager
     StorageResult<void> SetOwner(const fs::path& fuse_path, uid_t uid, gid_t gid);
 
     private:
-    void FetchAndCacheRegionAsync(
-        const fs::path& fuse_path, off_t offset, size_t size
+    void CacheRegionAsync(
+        const fs::path& fuse_path, off_t offset, std::vector<std::byte> region_data,
+        double fetch_cost_ms
     );
 
     StorageResult<std::shared_ptr<CacheTier>> SelectCacheTierForWrite(
@@ -87,7 +88,9 @@ class CacheManager
 
     void InvalidateCache(const fs::path& fuse_path);
 
-    void TryPromoteBlock(const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier);
+    void TryPromoteBlock(
+        const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier
+    );
 
     StorageResult<CoherencyMetadata> GetOriginCoherencyMetadata(const fs::path& fuse_path) const;
 

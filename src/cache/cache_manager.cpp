@@ -108,7 +108,7 @@ StorageResult<size_t> CacheManager::ReadFile(
     if (size_to_read == 0) return 0;
 
     RegionList missing_regions = {{offset, size_to_read}};
-    size_t bytes_from_cache = 0;
+    size_t bytes_from_cache    = 0;
     std::vector<std::shared_ptr<CacheTier>> resident_tiers;
 
     {
@@ -118,17 +118,18 @@ StorageResult<size_t> CacheManager::ReadFile(
             resident_tiers.assign(it->second.resident_tiers.begin(), it->second.resident_tiers.end());
         }
     }
-    
+
     // Iterate through tiers, refining the missing_regions list
     for (const auto& tier : resident_tiers) {
         if (missing_regions.empty()) break;
         RegionList current_tier_missing;
         for (const auto& missing_region : missing_regions) {
-            auto regions_res = tier->GetCachedRegions(fuse_path, missing_region.first, missing_region.second, origin_meta);
-            if(regions_res) {
+            auto regions_res =
+                tier->GetCachedRegions(fuse_path, missing_region.first, missing_region.second, origin_meta);
+            if (regions_res) {
                 auto& [cached, missing] = *regions_res;
-                for(const auto& r : cached) {
-                    off_t buffer_start_at = r.first - offset;
+                for (const auto& r : cached) {
+                    off_t buffer_start_at        = r.first - offset;
                     std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, r.second};
                     auto read_res = tier->GetStorage()->Read(fuse_path, r.first, sub_buffer);
                     if (read_res) bytes_from_cache += *read_res;
@@ -145,15 +146,38 @@ StorageResult<size_t> CacheManager::ReadFile(
     if (!missing_regions.empty()) {
         std::vector<std::future<StorageResult<size_t>>> futures;
         for (const auto& region : missing_regions) {
-            off_t buffer_start_at = region.first - offset;
+            off_t buffer_start_at        = region.first - offset;
             std::span<std::byte> sub_buffer{buffer.data() + buffer_start_at, region.second};
             futures.push_back(io_manager_->SubmitRead(origin_, fuse_path, region.first, sub_buffer));
         }
-        for(size_t i = 0; i < futures.size(); ++i) {
-            auto res = futures[i].get();
-            if(res) {
+        for (size_t i = 0; i < futures.size(); ++i) {
+            auto start_time = std::chrono::steady_clock::now();
+            auto res        = futures[i].get();
+            auto end_time   = std::chrono::steady_clock::now();
+
+            if (res) {
                 bytes_from_origin += *res;
-                FetchAndCacheRegionAsync(fuse_path, missing_regions[i].first, *res);
+                size_t bytes_actually_read = *res;
+
+                if (bytes_actually_read > 0) {
+                    off_t region_offset = missing_regions[i].first;
+                    double fetch_cost_ms =
+                        std::max(1.0, static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        end_time - start_time
+                                    )
+                                        .count()));
+
+                    off_t buffer_start_at = region_offset - offset;
+                    std::vector<std::byte> data_to_cache(bytes_actually_read);
+                    std::copy_n(buffer.data() + buffer_start_at, bytes_actually_read, data_to_cache.begin());
+
+                    io_manager_->SubmitTask(
+                        [this, fuse_path, region_offset, data_to_cache = std::move(data_to_cache), fetch_cost_ms](
+                        ) mutable {
+                            this->CacheRegionAsync(fuse_path, region_offset, std::move(data_to_cache), fetch_cost_ms);
+                        }
+                    );
+                }
             } else {
                 return std::unexpected(res.error());
             }
@@ -214,7 +238,7 @@ StorageResult<void> CacheManager::TruncateFile(std::filesystem::path& fuse_path,
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
     auto res = origin_->Truncate(fuse_path, size);
-    if (res) InvalidateCache(fuse_path); // Simple invalidation, can be optimized
+    if (res) InvalidateCache(fuse_path);  // Simple invalidation, can be optimized
     return res;
 }
 
@@ -240,7 +264,7 @@ StorageResult<void> CacheManager::CreateFile(std::filesystem::path& fuse_path, m
     auto file_mutex = file_lock_manager_->GetFileLock(fuse_path);
     std::lock_guard file_lock(*file_mutex);
     auto res = origin_->CreateFile(fuse_path, mode);
-    if(res) InvalidateCache(fuse_path);
+    if (res) InvalidateCache(fuse_path);
     return res;
 }
 
@@ -264,43 +288,63 @@ StorageResult<struct statvfs> CacheManager::GetFilesystemStats(fs::path& fuse_pa
     return origin_->GetFilesystemStats(fuse_path.string());
 }
 
-void CacheManager::FetchAndCacheRegionAsync(
-    const fs::path& fuse_path, off_t offset, size_t size
+void CacheManager::CacheRegionAsync(
+    const fs::path& fuse_path, off_t offset, std::vector<std::byte> region_data,
+    double fetch_cost_ms
 )
 {
-    if (size == 0) return;
+    if (region_data.empty()) return;
 
-    auto now         = std::chrono::system_clock::now();
-    std::vector<std::byte> region_data(size);
+    size_t size = region_data.size();
     std::span<std::byte> region_span{region_data};
-    
-    // This read is technically redundant since the data was just fetched.
-    // In a real implementation, the fetched data would be passed here directly.
-    auto read_res = origin_->Read(fuse_path, offset, region_span);
-    if (!read_res || *read_res == 0) return;
-
-    auto elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - now);
-    double fetch_cost_ms = std::max(1.0, static_cast<double>(elapsed.count()));
 
     auto origin_meta_res = GetOriginCoherencyMetadata(fuse_path);
-    if (!origin_meta_res) return;
+    if (!origin_meta_res) {
+        spdlog::warn("CacheRegionAsync for {} failed: could not get origin metadata.", fuse_path.string());
+        return;
+    }
 
-    auto tier_res = SelectCacheTierForWrite(fetch_cost_ms, size);
-    if (!tier_res || !tier_res.value()) return;
+    std::shared_ptr<CacheTier>
+        best_tier = nullptr;  // Find a tier to calculate heat
+    if (!tier_to_cache_.empty()) {
+        auto top_tier_level = tier_to_cache_.rbegin()->first;
+        if (!tier_to_cache_.at(top_tier_level).empty()) {
+            best_tier = tier_to_cache_.at(top_tier_level).front();
+        }
+    }
+    if (!best_tier) {
+        spdlog::debug("CacheRegionAsync for {}: no cache tiers available to cache to.", fuse_path.string());
+        return;
+    }
+
+    double initial_heat = best_tier->CalculateInitialRegionHeat(fetch_cost_ms, size);
+    auto tier_res = SelectCacheTierForWrite(initial_heat, size);
+
+    if (!tier_res || !tier_res.value()) {
+        spdlog::debug(
+            "CacheRegionAsync for {}: no suitable cache tier found or region not worth inserting.",
+            fuse_path.string()
+        );
+        return;
+    }
     auto tier = tier_res.value();
-    
+
     ItemMetadata meta{fuse_path, *origin_meta_res, {}, fetch_cost_ms};
     auto cache_res = tier->CacheRegion(fuse_path, offset, region_span, meta);
     if (cache_res) {
         std::unique_lock lock(file_states_mutex_);
         file_states_[fuse_path].resident_tiers.insert(tier);
         file_states_[fuse_path].coherency_metadata = *origin_meta_res;
+    } else {
+        spdlog::warn(
+            "CacheRegionAsync for {} failed: tier->CacheRegion returned an error: {}", fuse_path.string(),
+            cache_res.error().message()
+        );
     }
 }
 
 StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
-    double fetch_cost_ms, size_t region_size
+    double new_region_heat, size_t new_region_size
 )
 {
     // A simplified tier selection logic
@@ -311,22 +355,24 @@ StorageResult<std::shared_ptr<CacheTier>> CacheManager::SelectCacheTierForWrite(
 
     for (auto it = tier_to_cache_.rbegin(); it != tier_to_cache_.rend(); ++it) {
         for (const auto& tier : it->second) {
-            double heat  = tier->CalculateInitialRegionHeat(fetch_cost_ms, region_size);
-            auto worth_res = tier->IsRegionWorthInserting(heat, region_size);
+            auto worth_res = tier->IsRegionWorthInserting(new_region_heat, new_region_size);
             if (worth_res && *worth_res) return tier;
         }
     }
     return nullptr;
 }
 
-void CacheManager::TryPromoteBlock(const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier)
+void CacheManager::TryPromoteBlock(
+    const fs::path& fuse_path, off_t offset, size_t size, std::shared_ptr<CacheTier> source_tier
+)
 {
     // Implementation for promoting a block to a higher tier would go here.
     // It would involve reading from source_tier, writing to a faster tier,
     // updating file_states_, and punching a hole in the source_tier storage.
 }
 
-StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(const fs::path& fuse_path
+StorageResult<CoherencyMetadata> CacheManager::GetOriginCoherencyMetadata(
+    const fs::path& fuse_path
 ) const
 {
     auto res = origin_->GetAttributes(fuse_path);

@@ -31,11 +31,13 @@ class AsyncIoManager
         std::span<std::byte> buffer
     );
 
+    void SubmitTask(std::function<void()>&& task);
+
     private:
     void WorkerThread();
 
     std::vector<std::thread> workers_;
-    std::deque<std::packaged_task<ReadResult()>> tasks_;
+    std::deque<std::function<void()>> tasks_;
     std::mutex queue_mutex_;
     std::condition_variable condition_;
     bool stop_ = false;
