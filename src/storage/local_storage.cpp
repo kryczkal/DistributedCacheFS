@@ -15,6 +15,7 @@
 #include <fstream>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace DistributedCacheFS::Storage
 {
@@ -118,6 +119,21 @@ class FileDescriptorGuard
 };
 
 }  // namespace
+
+LocalStorage::LocalStorage(const Config::StorageDefinition& definition)
+    : definition_(definition), base_path_(definition.path)
+{
+}
+
+Config::StorageType LocalStorage::GetType() const
+{
+    return definition_.type;
+}
+
+const std::filesystem::path& LocalStorage::GetPath() const
+{
+    return base_path_;
+}
 
 std::filesystem::path LocalStorage::RelativeToAbsPath(const std::filesystem::path& relative_path
 ) const
@@ -252,7 +268,7 @@ StorageResult<std::uint64_t> LocalStorage::GetAvailableBytes() const
 {
     std::lock_guard<std::recursive_mutex> lock(storage_mutex_);
     std::error_code ec;
-    auto available = 0;
+    uint64_t available = 0;
     if (stats_.UsesSizeTracking()) {
         if (stats_.GetCurrentSizeBytes() < stats_.GetMaxSizeBytes()) {
             available = stats_.GetMaxSizeBytes() - stats_.GetCurrentSizeBytes();
@@ -545,7 +561,7 @@ StorageResult<void> LocalStorage::CreateFile(
 
     // Use open() with O_CREAT to create if not exists, but not truncate.
     // The mode is applied on creation, respecting the process umask.
-    int fd = ::open(full_path.c_str(), O_WRONLY | O_CREAT, mode);
+    int fd = ::open(full_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, mode);
     if (fd < 0) {
         return std::unexpected(make_error_code(ErrnoToStorageErrc(errno)));
     }
@@ -755,10 +771,6 @@ StorageResult<void> LocalStorage::RemoveXattr(
     return {};
 }
 
-LocalStorage::LocalStorage(const Config::StorageDefinition& definition)
-    : definition_(definition), base_path_(definition.path)
-{
-}
 StorageResult<std::vector<std::pair<std::string, struct stat>>> LocalStorage::ListDirectory(
     const std::filesystem::path& relative_path
 )

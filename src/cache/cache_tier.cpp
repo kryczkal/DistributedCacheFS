@@ -205,8 +205,10 @@ bool CacheTier::RemoveLink(const FileId& file_id, const fs::path& path_to_remove
 
 void CacheTier::RenameLink(const FileId& file_id, const fs::path& from, const fs::path& to)
 {
-    block_manager_->RenameLink(file_id, from, to);
-    storage_instance_->Move(from, to);
+    auto move_res = storage_instance_->Move(from, to);
+    if (move_res) {
+        block_manager_->RenameLink(file_id, from, to);
+    }
 }
 
 double CacheTier::CalculateInitialRegionHeat(double fetch_cost_ms, size_t region_size) const

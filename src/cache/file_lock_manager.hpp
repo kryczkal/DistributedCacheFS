@@ -1,6 +1,7 @@
 #ifndef DISTRIBUTEDCACHEFS_SRC_CACHE_FILE_LOCK_MANAGER_HPP_
 #define DISTRIBUTEDCACHEFS_SRC_CACHE_FILE_LOCK_MANAGER_HPP_
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -22,7 +23,7 @@ namespace fs = std::filesystem;
  */
 class FileLockManager
 {
-public:
+    public:
     FileLockManager()                                  = default;
     ~FileLockManager()                                 = default;
 
@@ -47,11 +48,16 @@ public:
      */
     std::shared_ptr<std::mutex> GetFileLock(const fs::path& path);
 
-private:
+    private:
+    void CleanupExpiredLocks_();
+
     std::mutex map_mutex_;
     std::unordered_map<fs::path, std::weak_ptr<std::mutex>> locks_;
+
+    std::atomic<size_t> access_count_{0};
+    static constexpr size_t kCleanupInterval = 1000;
 };
 
-} // namespace DistributedCacheFS::Cache
+}  // namespace DistributedCacheFS::Cache
 
-#endif // DISTRIBUTEDCACHEFS_SRC_CACHE_FILE_LOCK_MANAGER_HPP_
+#endif  // DISTRIBUTEDCACHEFS_SRC_CACHE_FILE_LOCK_MANAGER_HPP_
